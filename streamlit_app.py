@@ -20,17 +20,17 @@ def inject_theme():
     logo_file = os.path.join(BASE_DIR, 'static', 'logo.jpg')
     logo_b64  = base64.b64encode(open(logo_file,'rb').read()).decode() if os.path.exists(logo_file) else ""
 
-    # NOTE: plain string (NOT f-string) — no escaping needed, no CSS file injection
+    # Inline all CSS — no CDN dependency (Streamlit Cloud CSP blocks external stylesheets)
     st.markdown("""
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+      crossorigin="anonymous" referrerpolicy="no-referrer">
 <style>
-/* ── Streamlit chrome ── */
+/* ════ Streamlit chrome ════ */
 #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],
 [data-testid="stHeader"]{display:none !important;}
 .block-container{padding:0 !important;max-width:100% !important;}
 
-/* ── Sidebar ── */
+/* ════ Sidebar dark gradient ════ */
 [data-testid="stSidebar"]{
     background:linear-gradient(180deg,#0f3460 0%,#1a1a2e 100%) !important;
     border-right:none !important;min-width:245px !important;max-width:260px !important;
@@ -38,54 +38,56 @@ def inject_theme():
 [data-testid="stSidebar"] *{color:#e2e8f0 !important;}
 [data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.15) !important;}
 [data-testid="stSidebarContent"]{padding:0 !important;}
-[data-testid="stSidebar"] .stButton>button{
+/* sidebar nav buttons */
+[data-testid="stSidebar"] .stButton button{
     width:100% !important;background:transparent !important;
     color:#cbd5e1 !important;border:none !important;
     text-align:left !important;padding:9px 16px !important;
     border-radius:8px !important;font-size:.88rem !important;
     margin-bottom:2px !important;transition:all .2s !important;
 }
-[data-testid="stSidebar"] .stButton>button:hover{
-    background:rgba(255,255,255,.1) !important;color:#fff !important;
+[data-testid="stSidebar"] .stButton button:hover{
+    background:rgba(255,255,255,.12) !important;color:#fff !important;
     transform:translateX(4px) !important;
 }
 
-/* ── Main area ── */
-section.main .block-container{padding:1.5rem 2rem !important;}
-section.main .stButton>button{
+/* ════ Main area ════ */
+section.main .block-container,.main .block-container{padding:1.5rem 2rem !important;}
+/* main action buttons */
+section.main .stButton button,.main .stButton button{
     background:linear-gradient(135deg,#0f3460,#533483) !important;
     color:#fff !important;border:none !important;
     border-radius:8px !important;font-weight:600 !important;
     padding:8px 20px !important;transition:all .2s !important;
 }
-section.main .stButton>button:hover{
+section.main .stButton button:hover,.main .stButton button:hover{
     transform:translateY(-1px) !important;
     box-shadow:0 4px 15px rgba(83,52,131,.4) !important;
 }
 
-/* ── Inputs ── */
+/* ════ Inputs ════ */
 .stTextInput input,.stNumberInput input{
     border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
 }
 .stTextInput input:focus{
-    border-color:#533483 !important;
-    box-shadow:0 0 0 3px rgba(83,52,131,.1) !important;
+    border-color:#533483 !important;box-shadow:0 0 0 3px rgba(83,52,131,.1) !important;
 }
 .stTextArea textarea{border:1.5px solid #e2e8f0 !important;border-radius:8px !important;}
 .stSelectbox>div>div{border:1.5px solid #e2e8f0 !important;border-radius:8px !important;}
 
-/* ── Tabs ── */
+/* ════ Tabs ════ */
 .stTabs [data-baseweb="tab-list"]{background:#f1f5f9;border-radius:10px;padding:4px;gap:4px;}
 .stTabs [data-baseweb="tab"]{border-radius:8px;padding:6px 18px;font-weight:600;}
 .stTabs [aria-selected="true"]{
     background:linear-gradient(135deg,#0f3460,#533483) !important;color:#fff !important;
 }
 
-/* ── Dataframe / Alerts ── */
+/* ════ Streamlit widget overrides ════ */
 [data-testid="stDataFrame"]{border-radius:12px !important;overflow:hidden !important;}
 .stAlert{border-radius:12px !important;}
+[data-testid="stMetricValue"]{font-size:2rem !important;font-weight:800 !important;}
 
-/* ── Panel component ── */
+/* ════ Panel component ════ */
 .panel{background:#fff;border-radius:16px;box-shadow:0 2px 15px rgba(0,0,0,.06);
     border:1px solid #f1f5f9;margin-bottom:20px;overflow:hidden;}
 .panel-header{display:flex;align-items:center;justify-content:space-between;
@@ -93,8 +95,10 @@ section.main .stButton>button:hover{
 .panel-title{font-weight:700;color:#1e293b;font-size:1rem;}
 .panel-body{padding:20px;}
 .panel-body.p-0{padding:0;}
+.topbar{padding:12px 2rem;border-bottom:1px solid #f1f5f9;margin-bottom:1.5rem;}
+.topbar-title{font-size:1.1rem;font-weight:700;color:#1e293b;}
 
-/* ── Stat cards ── */
+/* ════ Stat cards ════ */
 .stat-card{border-radius:14px;padding:20px;text-align:center;
     border:1px solid rgba(0,0,0,.05);background:linear-gradient(135deg,#f0f4ff,#e8effe);}
 .stat-card .icon{width:48px;height:48px;border-radius:12px;display:flex;
@@ -110,6 +114,7 @@ section.main .stButton>button:hover{
 .card-icon-success{background:linear-gradient(135deg,#16a34a,#22c55e);}
 .card-info{background:linear-gradient(135deg,#eff6ff,#dbeafe);}
 .card-info .value{color:#2563eb;}
+.card-icon-info{background:linear-gradient(135deg,#2563eb,#3b82f6);}
 .card-danger{background:linear-gradient(135deg,#fef2f2,#fee2e2);}
 .card-danger .value{color:#dc2626;}
 .card-icon-danger{background:linear-gradient(135deg,#dc2626,#ef4444);}
@@ -118,15 +123,83 @@ section.main .stButton>button:hover{
 .card-icon-warning{background:linear-gradient(135deg,#d97706,#f59e0b);}
 .card-purple{background:linear-gradient(135deg,#faf5ff,#f3e8ff);}
 .card-purple .value{color:#7c3aed;}
+.card-icon-purple{background:linear-gradient(135deg,#7c3aed,#8b5cf6);}
 
-/* ── Tables ── */
-.table-modern{margin:0 !important;}
+/* ════ Tables ════ */
+.table-modern{width:100%;border-collapse:collapse;margin:0;}
 .table-modern thead{background:#f8fafc;}
-.table-modern thead th{padding:10px 14px;color:#64748b;font-size:.72rem;
-    font-weight:700;text-transform:uppercase;letter-spacing:.05em;
-    border-bottom:1px solid #e2e8f0;}
+.table-modern thead th{padding:10px 14px;color:#64748b;font-size:.72rem;font-weight:700;
+    text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #e2e8f0;}
 .table-modern tbody td{padding:11px 14px;border-bottom:1px solid #f8fafc;vertical-align:middle;}
 .table-modern tbody tr:hover{background:#f8fafc;}
+
+/* ════ Badges (Bootstrap-compatible, inline fallback) ════ */
+.badge{display:inline-block;padding:.3em .65em;font-size:.72rem;font-weight:700;
+    line-height:1;text-align:center;white-space:nowrap;vertical-align:baseline;border-radius:.4rem;}
+.bg-warning{background-color:#ffc107 !important;color:#212529 !important;}
+.bg-success{background-color:#198754 !important;color:#fff !important;}
+.bg-danger{background-color:#dc3545 !important;color:#fff !important;}
+.bg-primary{background-color:#0d6efd !important;color:#fff !important;}
+.bg-secondary{background-color:#6c757d !important;color:#fff !important;}
+.bg-info{background-color:#0dcaf0 !important;color:#212529 !important;}
+.bg-warning.text-dark,.text-dark{color:#212529 !important;}
+.bg-danger-subtle{background-color:#f8d7da !important;}
+.bg-success-subtle{background-color:#d1e7dd !important;}
+.text-danger{color:#dc3545 !important;}
+.text-success{color:#198754 !important;}
+.text-warning{color:#ffc107 !important;}
+
+/* ════ Alerts ════ */
+.alert{padding:.75rem 1rem;border-radius:.5rem;margin-bottom:1rem;border:1px solid transparent;}
+.alert-info{background:#cff4fc;border-color:#b6effb;color:#055160;}
+.alert-warning{background:#fff3cd;border-color:#ffe69c;color:#664d03;}
+.alert-success{background:#d1e7dd;border-color:#badbcc;color:#0a3622;}
+
+/* ════ Bootstrap layout utilities (inline fallback) ════ */
+.d-flex{display:flex !important;}
+.flex-column{flex-direction:column !important;}
+.align-items-center{align-items:center !important;}
+.align-items-start{align-items:flex-start !important;}
+.justify-content-between{justify-content:space-between !important;}
+.justify-content-end{justify-content:flex-end !important;}
+.justify-content-center{justify-content:center !important;}
+.gap-2{gap:.5rem !important;}
+.gap-3{gap:1rem !important;}
+.flex-fill{flex:1 1 auto !important;}
+.flex-wrap{flex-wrap:wrap !important;}
+.w-100{width:100% !important;}
+/* spacing */
+.mt-1{margin-top:.25rem !important;}.mt-2{margin-top:.5rem !important;}
+.mt-3{margin-top:1rem !important;}.mt-4{margin-top:1.5rem !important;}
+.mb-0{margin-bottom:0 !important;}.mb-1{margin-bottom:.25rem !important;}
+.mb-2{margin-bottom:.5rem !important;}.mb-3{margin-bottom:1rem !important;}
+.mb-4{margin-bottom:1.5rem !important;}.me-1{margin-right:.25rem !important;}
+.me-2{margin-right:.5rem !important;}.ms-1{margin-left:.25rem !important;}
+.ms-auto{margin-left:auto !important;}
+.py-3{padding-top:1rem !important;padding-bottom:1rem !important;}
+.py-4{padding-top:1.5rem !important;padding-bottom:1.5rem !important;}
+.py-5{padding-top:3rem !important;padding-bottom:3rem !important;}
+.p-2{padding:.5rem !important;}.p-3{padding:1rem !important;}
+/* text */
+.text-center{text-align:center !important;}.text-end{text-align:right !important;}
+.text-muted{color:#6c757d !important;}.text-white{color:#fff !important;}
+.fw-semibold{font-weight:600 !important;}.fw-bold{font-weight:700 !important;}
+.small,.small *{font-size:.875rem !important;}.fs-5{font-size:1.25rem !important;}
+.fs-6{font-size:1rem !important;}
+/* misc */
+.opacity-50{opacity:.5 !important;}.bg-light{background-color:#f8f9fa !important;}
+.rounded{border-radius:.375rem !important;}.overflow-hidden{overflow:hidden !important;}
+.word-break-break-word{word-break:break-word !important;}
+/* grid — minimal col support */
+.row{display:flex;flex-wrap:wrap;margin:0 -.5rem;}
+.col-12{flex:0 0 100%;max-width:100%;padding:0 .5rem;}
+/* table utils */
+.table-responsive{overflow-x:auto;}
+.table-sm td,.table-sm th{padding:.4rem .6rem;}
+.table-bordered td,.table-bordered th{border:1px solid #dee2e6;}
+.mb-0.table{margin-bottom:0;}
+/* vertical align */
+.vertical-middle,.align-middle{vertical-align:middle !important;}
 </style>
 """, unsafe_allow_html=True)
     return logo_b64
