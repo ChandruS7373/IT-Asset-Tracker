@@ -16,8 +16,11 @@ app = Flask(__name__)
 app.secret_key = 'ittracker_secret_2024'
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'ittracker.db')
-EXCEL_PATH = r'C:\Users\YashwanthHP\Downloads\IT Asset working (1).xlsx'
+EXCEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'assets.xlsx')
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'email_config.ini')
+
+# Ensure data directory exists on any platform
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 
 def get_smtp_config():
@@ -1683,9 +1686,11 @@ def technician_request_detail(req_id):
     return render_template('technician/request_detail.html', req=req, messages=messages)
 
 
+# Run DB init and Excel import at module load time so gunicorn/WSGI works too
+init_db()
+import_excel()
+
 if __name__ == '__main__':
-    init_db()
-    import_excel()
     print("\n" + "="*50)
     print("  IT Asset Tracker is running!")
     print("  Open: http://localhost:5000")
