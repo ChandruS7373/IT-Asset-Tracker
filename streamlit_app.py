@@ -17,87 +17,118 @@ os.makedirs(os.path.join(BASE_DIR, 'data'), exist_ok=True)
 # ─── Theme injection ────────────────────────────────────────────────────────────
 
 def inject_theme():
-    css_file = os.path.join(BASE_DIR, 'static', 'css', 'style.css')
-    css = open(css_file, encoding='utf-8').read() if os.path.exists(css_file) else ""
-
     logo_file = os.path.join(BASE_DIR, 'static', 'logo.jpg')
     logo_b64  = base64.b64encode(open(logo_file,'rb').read()).decode() if os.path.exists(logo_file) else ""
 
-    st.markdown(f"""
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-    {css}
+    # NOTE: plain string (NOT f-string) — no escaping needed, no CSS file injection
+    st.markdown("""
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<style>
+/* ── Streamlit chrome ── */
+#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],
+[data-testid="stHeader"]{display:none !important;}
+.block-container{padding:0 !important;max-width:100% !important;}
 
-    /* ── hide streamlit chrome ── */
-    #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],
-    [data-testid="stHeader"]{{display:none !important;}}
-    .block-container{{padding:0 !important;max-width:100% !important;}}
+/* ── Sidebar ── */
+[data-testid="stSidebar"]{
+    background:linear-gradient(180deg,#0f3460 0%,#1a1a2e 100%) !important;
+    border-right:none !important;min-width:245px !important;max-width:260px !important;
+}
+[data-testid="stSidebar"] *{color:#e2e8f0 !important;}
+[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.15) !important;}
+[data-testid="stSidebarContent"]{padding:0 !important;}
+[data-testid="stSidebar"] .stButton>button{
+    width:100% !important;background:transparent !important;
+    color:#cbd5e1 !important;border:none !important;
+    text-align:left !important;padding:9px 16px !important;
+    border-radius:8px !important;font-size:.88rem !important;
+    margin-bottom:2px !important;transition:all .2s !important;
+}
+[data-testid="stSidebar"] .stButton>button:hover{
+    background:rgba(255,255,255,.1) !important;color:#fff !important;
+    transform:translateX(4px) !important;
+}
 
-    /* ── sidebar dark gradient ── */
-    [data-testid="stSidebar"]{{
-        background:linear-gradient(180deg,#0f3460 0%,#1a1a2e 100%) !important;
-        border-right:none !important;
-        min-width:245px !important;max-width:260px !important;
-    }}
-    [data-testid="stSidebar"] *{{color:#e2e8f0 !important;}}
-    [data-testid="stSidebar"] hr{{border-color:rgba(255,255,255,.15) !important;}}
-    [data-testid="stSidebarContent"]{{padding:0 !important;}}
+/* ── Main area ── */
+section.main .block-container{padding:1.5rem 2rem !important;}
+section.main .stButton>button{
+    background:linear-gradient(135deg,#0f3460,#533483) !important;
+    color:#fff !important;border:none !important;
+    border-radius:8px !important;font-weight:600 !important;
+    padding:8px 20px !important;transition:all .2s !important;
+}
+section.main .stButton>button:hover{
+    transform:translateY(-1px) !important;
+    box-shadow:0 4px 15px rgba(83,52,131,.4) !important;
+}
 
-    /* sidebar buttons → nav-item look */
-    [data-testid="stSidebar"] .stButton>button{{
-        width:100% !important;background:transparent !important;
-        color:#cbd5e1 !important;border:none !important;
-        text-align:left !important;padding:9px 16px !important;
-        border-radius:8px !important;font-size:.88rem !important;
-        margin-bottom:2px !important;transition:all .2s !important;
-        justify-content:flex-start !important;
-    }}
-    [data-testid="stSidebar"] .stButton>button:hover{{
-        background:rgba(255,255,255,.1) !important;color:#fff !important;
-        transform:translateX(4px) !important;
-    }}
+/* ── Inputs ── */
+.stTextInput input,.stNumberInput input{
+    border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
+}
+.stTextInput input:focus{
+    border-color:#533483 !important;
+    box-shadow:0 0 0 3px rgba(83,52,131,.1) !important;
+}
+.stTextArea textarea{border:1.5px solid #e2e8f0 !important;border-radius:8px !important;}
+.stSelectbox>div>div{border:1.5px solid #e2e8f0 !important;border-radius:8px !important;}
 
-    /* main content padding */
-    section.main .block-container{{padding:1.5rem 2rem !important;}}
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"]{background:#f1f5f9;border-radius:10px;padding:4px;gap:4px;}
+.stTabs [data-baseweb="tab"]{border-radius:8px;padding:6px 18px;font-weight:600;}
+.stTabs [aria-selected="true"]{
+    background:linear-gradient(135deg,#0f3460,#533483) !important;color:#fff !important;
+}
 
-    /* main buttons */
-    section.main .stButton>button{{
-        background:linear-gradient(135deg,#0f3460,#533483) !important;
-        color:#fff !important;border:none !important;
-        border-radius:8px !important;font-weight:600 !important;
-        padding:8px 20px !important;transition:all .2s !important;
-    }}
-    section.main .stButton>button:hover{{
-        transform:translateY(-1px) !important;
-        box-shadow:0 4px 15px rgba(83,52,131,.4) !important;
-    }}
+/* ── Dataframe / Alerts ── */
+[data-testid="stDataFrame"]{border-radius:12px !important;overflow:hidden !important;}
+.stAlert{border-radius:12px !important;}
 
-    /* inputs */
-    .stTextInput input,.stNumberInput input{{
-        border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
-    }}
-    .stTextInput input:focus{{border-color:#533483 !important;
-        box-shadow:0 0 0 3px rgba(83,52,131,.1) !important;}}
-    .stTextArea textarea,.stSelectbox>div>div{{
-        border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
-    }}
+/* ── Panel component ── */
+.panel{background:#fff;border-radius:16px;box-shadow:0 2px 15px rgba(0,0,0,.06);
+    border:1px solid #f1f5f9;margin-bottom:20px;overflow:hidden;}
+.panel-header{display:flex;align-items:center;justify-content:space-between;
+    padding:16px 20px;border-bottom:1px solid #f1f5f9;}
+.panel-title{font-weight:700;color:#1e293b;font-size:1rem;}
+.panel-body{padding:20px;}
+.panel-body.p-0{padding:0;}
 
-    /* tabs */
-    .stTabs [data-baseweb="tab-list"]{{
-        background:#f1f5f9;border-radius:10px;padding:4px;gap:4px;
-    }}
-    .stTabs [data-baseweb="tab"]{{border-radius:8px;padding:6px 18px;font-weight:600;}}
-    .stTabs [aria-selected="true"]{{
-        background:linear-gradient(135deg,#0f3460,#533483) !important;color:#fff !important;
-    }}
+/* ── Stat cards ── */
+.stat-card{border-radius:14px;padding:20px;text-align:center;
+    border:1px solid rgba(0,0,0,.05);background:linear-gradient(135deg,#f0f4ff,#e8effe);}
+.stat-card .icon{width:48px;height:48px;border-radius:12px;display:flex;
+    align-items:center;justify-content:center;color:#fff;font-size:1.3rem;margin:0 auto 12px;}
+.stat-card .value,.stat-card .val{font-size:2rem;font-weight:800;line-height:1;color:#1e293b;}
+.stat-card .label,.stat-card .lbl{color:#64748b;font-size:.75rem;font-weight:700;
+    text-transform:uppercase;letter-spacing:.05em;margin-top:4px;}
+.card-primary{background:linear-gradient(135deg,#eef2ff,#e0e7ff);}
+.card-primary .value{color:#4f46e5;}
+.card-icon-primary{background:linear-gradient(135deg,#4f46e5,#6366f1);}
+.card-success{background:linear-gradient(135deg,#f0fdf4,#dcfce7);}
+.card-success .value{color:#16a34a;}
+.card-icon-success{background:linear-gradient(135deg,#16a34a,#22c55e);}
+.card-info{background:linear-gradient(135deg,#eff6ff,#dbeafe);}
+.card-info .value{color:#2563eb;}
+.card-danger{background:linear-gradient(135deg,#fef2f2,#fee2e2);}
+.card-danger .value{color:#dc2626;}
+.card-icon-danger{background:linear-gradient(135deg,#dc2626,#ef4444);}
+.card-warning{background:linear-gradient(135deg,#fffbeb,#fef3c7);}
+.card-warning .value{color:#d97706;}
+.card-icon-warning{background:linear-gradient(135deg,#d97706,#f59e0b);}
+.card-purple{background:linear-gradient(135deg,#faf5ff,#f3e8ff);}
+.card-purple .value{color:#7c3aed;}
 
-    /* dataframe */
-    [data-testid="stDataFrame"]{{border-radius:12px !important;overflow:hidden !important;}}
-    .stAlert{{border-radius:12px !important;}}
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    """, unsafe_allow_html=True)
+/* ── Tables ── */
+.table-modern{margin:0 !important;}
+.table-modern thead{background:#f8fafc;}
+.table-modern thead th{padding:10px 14px;color:#64748b;font-size:.72rem;
+    font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+    border-bottom:1px solid #e2e8f0;}
+.table-modern tbody td{padding:11px 14px;border-bottom:1px solid #f8fafc;vertical-align:middle;}
+.table-modern tbody tr:hover{background:#f8fafc;}
+</style>
+""", unsafe_allow_html=True)
     return logo_b64
 
 # ─── DB ────────────────────────────────────────────────────────────────────────
