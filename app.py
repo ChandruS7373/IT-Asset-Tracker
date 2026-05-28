@@ -1,1700 +1,1111 @@
-import os
-import json
-import sqlite3
-import random
-import smtplib
-import configparser
-from datetime import datetime, timedelta
+import streamlit as st
+import sqlite3, os, json, smtplib, configparser, base64
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
-import openpyxl
-import io
+import pandas as pd
 
-app = Flask(__name__)
-app.secret_key = 'ittracker_secret_2024'
+st.set_page_config(page_title="Qualesce IT Asset Tracker", page_icon="💻",
+                   layout="wide", initial_sidebar_state="expanded")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'ittracker.db')
-EXCEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'assets.xlsx')
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'email_config.ini')
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+DB_PATH     = os.path.join(BASE_DIR, 'data', 'ittracker.db')
+CONFIG_PATH = os.path.join(BASE_DIR, 'email_config.ini')
+EXCEL_PATH  = os.path.join(BASE_DIR, 'data', 'assets.xlsx')
+os.makedirs(os.path.join(BASE_DIR, 'data'), exist_ok=True)
 
-# Ensure data directory exists on any platform
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# ─── Theme injection ────────────────────────────────────────────────────────────
 
+def inject_theme():
+    css_file = os.path.join(BASE_DIR, 'static', 'css', 'style.css')
+    css = open(css_file, encoding='utf-8').read() if os.path.exists(css_file) else ""
 
-def get_smtp_config():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return cfg['SMTP'] if 'SMTP' in cfg else {}
+    logo_file = os.path.join(BASE_DIR, 'static', 'logo.jpg')
+    logo_b64  = base64.b64encode(open(logo_file,'rb').read()).decode() if os.path.exists(logo_file) else ""
 
+    st.markdown(f"""
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+    {css}
 
-def get_notification_prefs():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    sec = cfg['NOTIFICATIONS'] if 'NOTIFICATIONS' in cfg else {}
-    def b(key):
-        return sec.get(key, 'true').lower() != 'false'
-    return {
-        'new_request':          b('notify_new_request'),
-        'employee_action':      b('notify_employee_action'),
-        'technician_assigned':  b('notify_technician_assigned'),
-        'status_employee':      b('notify_status_employee'),
-        'status_admin':         b('notify_status_admin'),
-        'chat':                 b('notify_chat'),
-    }
+    /* ── hide streamlit chrome ── */
+    #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],
+    [data-testid="stHeader"]{{display:none !important;}}
+    .block-container{{padding:0 !important;max-width:100% !important;}}
 
+    /* ── sidebar dark gradient ── */
+    [data-testid="stSidebar"]{{
+        background:linear-gradient(180deg,#0f3460 0%,#1a1a2e 100%) !important;
+        border-right:none !important;
+        min-width:245px !important;max-width:260px !important;
+    }}
+    [data-testid="stSidebar"] *{{color:#e2e8f0 !important;}}
+    [data-testid="stSidebar"] hr{{border-color:rgba(255,255,255,.15) !important;}}
+    [data-testid="stSidebarContent"]{{padding:0 !important;}}
 
-def send_otp_email(to_email, otp_code, employee_name):
-    cfg = get_smtp_config()
-    host = cfg.get('SMTP_HOST', '')
-    port = int(cfg.get('SMTP_PORT', 587))
-    user = cfg.get('SMTP_USER', '')
-    pwd  = cfg.get('SMTP_PASSWORD', '')
-    from_name = cfg.get('FROM_NAME', 'Qualesce IT Tracker')
+    /* sidebar buttons → nav-item look */
+    [data-testid="stSidebar"] .stButton>button{{
+        width:100% !important;background:transparent !important;
+        color:#cbd5e1 !important;border:none !important;
+        text-align:left !important;padding:9px 16px !important;
+        border-radius:8px !important;font-size:.88rem !important;
+        margin-bottom:2px !important;transition:all .2s !important;
+        justify-content:flex-start !important;
+    }}
+    [data-testid="stSidebar"] .stButton>button:hover{{
+        background:rgba(255,255,255,.1) !important;color:#fff !important;
+        transform:translateX(4px) !important;
+    }}
 
-    if not user or user == 'your-email@gmail.com':
-        return False, 'SMTP not configured. Edit email_config.ini with your credentials.'
+    /* main content padding */
+    section.main .block-container{{padding:1.5rem 2rem !important;}}
 
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = 'IT Asset Tracker - Password Reset Code'
-    msg['From']    = f'{from_name} <{user}>'
-    msg['To']      = to_email
+    /* main buttons */
+    section.main .stButton>button{{
+        background:linear-gradient(135deg,#0f3460,#533483) !important;
+        color:#fff !important;border:none !important;
+        border-radius:8px !important;font-weight:600 !important;
+        padding:8px 20px !important;transition:all .2s !important;
+    }}
+    section.main .stButton>button:hover{{
+        transform:translateY(-1px) !important;
+        box-shadow:0 4px 15px rgba(83,52,131,.4) !important;
+    }}
 
-    html = f"""
-    <div style="font-family:Segoe UI,sans-serif;max-width:480px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-      <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:28px 30px;text-align:center">
-        <h2 style="color:#fff;margin:0;font-size:1.3rem">Password Reset Request</h2>
-      </div>
-      <div style="padding:30px">
-        <p style="color:#374151">Hi <strong>{employee_name}</strong>,</p>
-        <p style="color:#374151">Use the code below to reset your password. It expires in <strong>10 minutes</strong>.</p>
-        <div style="text-align:center;margin:28px 0">
-          <span style="background:#f0f4ff;border:2px dashed #6366f1;border-radius:10px;padding:16px 36px;font-size:2.2rem;font-weight:800;letter-spacing:10px;color:#1e1b4b">{otp_code}</span>
-        </div>
-        <p style="color:#6b7280;font-size:0.85rem">If you did not request this, ignore this email. Your password will not change.</p>
-      </div>
-      <div style="background:#f8fafc;padding:14px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">
-        Qualesce IT Asset Tracker &nbsp;|&nbsp; Do not reply to this email
-      </div>
-    </div>
-    """
-    msg.attach(MIMEText(html, 'html'))
+    /* inputs */
+    .stTextInput input,.stNumberInput input{{
+        border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
+    }}
+    .stTextInput input:focus{{border-color:#533483 !important;
+        box-shadow:0 0 0 3px rgba(83,52,131,.1) !important;}}
+    .stTextArea textarea,.stSelectbox>div>div{{
+        border:1.5px solid #e2e8f0 !important;border-radius:8px !important;
+    }}
 
-    try:
-        with smtplib.SMTP(host, port, timeout=10) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(user, pwd)
-            s.sendmail(user, to_email, msg.as_string())
-        return True, 'OTP sent successfully'
-    except Exception as e:
-        return False, str(e)
+    /* tabs */
+    .stTabs [data-baseweb="tab-list"]{{
+        background:#f1f5f9;border-radius:10px;padding:4px;gap:4px;
+    }}
+    .stTabs [data-baseweb="tab"]{{border-radius:8px;padding:6px 18px;font-weight:600;}}
+    .stTabs [aria-selected="true"]{{
+        background:linear-gradient(135deg,#0f3460,#533483) !important;color:#fff !important;
+    }}
 
-def get_user_notif_prefs(user_id):
-    conn = get_db()
-    row = conn.execute("SELECT notification_prefs FROM users WHERE id=?", (user_id,)).fetchone()
-    conn.close()
-    try:
-        return json.loads(row['notification_prefs']) if row and row['notification_prefs'] else {}
-    except Exception:
-        return {}
+    /* dataframe */
+    [data-testid="stDataFrame"]{{border-radius:12px !important;overflow:hidden !important;}}
+    .stAlert{{border-radius:12px !important;}}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    """, unsafe_allow_html=True)
+    return logo_b64
 
-
-def _should_notify_employee(employee_id, emp_email, global_key, pref_key):
-    if not emp_email:
-        return False
-    if not get_notification_prefs().get(global_key, True):
-        return False
-    return get_user_notif_prefs(employee_id).get(pref_key, True)
-
-
-def _should_notify_tech(tech_id, tech_email, global_key, pref_key):
-    if not tech_email:
-        return False
-    if not get_notification_prefs().get(global_key, True):
-        return False
-    return get_user_notif_prefs(tech_id).get(pref_key, True)
-
-
-def send_notification_email(to_emails, subject, html_body):
-    cfg = get_smtp_config()
-    host = cfg.get('smtp_host', '')
-    port = int(cfg.get('smtp_port', 587))
-    user = cfg.get('smtp_user', '')
-    pwd  = cfg.get('smtp_password', '')
-    from_name = cfg.get('from_name', 'Qualesce IT Tracker')
-    if not user or user == 'your-email@gmail.com':
-        return False, 'SMTP not configured'
-    if isinstance(to_emails, str):
-        to_emails = [to_emails]
-    to_emails = [e for e in to_emails if e]
-    if not to_emails:
-        return False, 'No recipients'
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From']    = f'{from_name} <{user}>'
-    msg['To']      = ', '.join(to_emails)
-    msg.attach(MIMEText(html_body, 'html'))
-    try:
-        with smtplib.SMTP(host, port, timeout=10) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(user, pwd)
-            s.sendmail(user, to_emails, msg.as_string())
-        return True, 'Email sent'
-    except Exception as e:
-        return False, str(e)
-
-
-def build_chat_email_html(sender_name, sender_role, message, req_id, service_type):
-    role_labels = {'admin': 'Admin', 'technician': 'Technician', 'user': 'Employee'}
-    return f"""
-    <div style="font-family:Segoe UI,sans-serif;max-width:560px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-      <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-        <h2 style="color:#fff;margin:0;font-size:1.2rem">New Message — Request #{req_id}</h2>
-      </div>
-      <div style="padding:28px 30px">
-        <p style="color:#374151">New message from <strong>{sender_name}</strong> ({role_labels.get(sender_role, sender_role)}) on <strong>Request #{req_id}</strong> ({service_type}):</p>
-        <div style="background:#f1f5f9;border-left:4px solid #533483;border-radius:4px;padding:14px 18px;margin:18px 0;color:#1e293b">{message}</div>
-        <p style="color:#6b7280;font-size:0.9rem">Please log in to IT Asset Tracker to reply.</p>
-      </div>
-      <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-    </div>"""
-
-
-def build_status_email_html(employee_name, new_status, req_id, service_type, asset_no):
-    colors = {'In Progress': '#f59e0b', 'Hold': '#6b7280', 'Completed': '#22c55e',
-              'Accepted': '#22c55e', 'Declined': '#ef4444', 'Pending': '#3b82f6'}
-    color = colors.get(new_status, '#374151')
-    return f"""
-    <div style="font-family:Segoe UI,sans-serif;max-width:560px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-      <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-        <h2 style="color:#fff;margin:0;font-size:1.2rem">Request #{req_id} — Status Updated</h2>
-      </div>
-      <div style="padding:28px 30px">
-        <p style="color:#374151">Hi <strong>{employee_name}</strong>,</p>
-        <p style="color:#374151">Your service request status is now <strong style="color:{color}">{new_status}</strong>.</p>
-        <table style="width:100%;border-collapse:collapse;margin:16px 0">
-          <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;width:40%;font-weight:600">Request #</td><td style="padding:8px 12px;color:#1e293b">#{req_id}</td></tr>
-          <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Asset</td><td style="padding:8px 12px;color:#1e293b">{asset_no}</td></tr>
-          <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;font-weight:600">Issue Type</td><td style="padding:8px 12px;color:#1e293b">{service_type}</td></tr>
-          <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">New Status</td><td style="padding:8px 12px;font-weight:700;color:{color}">{new_status}</td></tr>
-        </table>
-      </div>
-      <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-    </div>"""
-
-
-# ---------------------------------------------------------------------------
-# Database setup
-# ---------------------------------------------------------------------------
+# ─── DB ────────────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; return conn
 
 def init_db():
-    conn = get_db()
-    c = conn.cursor()
+    conn = get_db(); c = conn.cursor()
     c.executescript('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            employee_name TEXT,
-            email TEXT,
-            department TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS assets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_no TEXT UNIQUE,
-            asset_status TEXT,
-            login_id TEXT,
-            serial_no TEXT,
-            transfer_history TEXT,
-            model TEXT,
-            years TEXT,
-            resolution TEXT,
-            sn TEXT,
-            model2 TEXT,
-            warranty_start TEXT,
-            warranty_end TEXT,
-            warranty_type TEXT,
-            warranty_status TEXT,
-            lan_mac TEXT,
-            lan_ip TEXT,
-            wireless_mac TEXT,
-            wan_ip TEXT,
-            admin_usb TEXT,
-            bios_password TEXT,
-            admin_password TEXT,
-            spiceworks TEXT,
-            windows_update TEXT,
-            unwanted_apps TEXT,
-            processor TEXT,
-            ram TEXT,
-            hdd TEXT,
-            office365 TEXT,
-            sharepoint TEXT,
-            onedrive TEXT,
-            worksoft TEXT,
-            ia TEXT,
-            sql_version TEXT,
-            system_cleanup TEXT,
+        CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user',
+            employee_name TEXT, email TEXT, department TEXT,
+            notification_prefs TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS assets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_no TEXT UNIQUE,
+            asset_status TEXT, login_id TEXT, serial_no TEXT,
+            transfer_history TEXT, model TEXT, years TEXT, resolution TEXT,
+            warranty_start TEXT, warranty_end TEXT, warranty_status TEXT,
+            processor TEXT, ram TEXT, hdd TEXT, lan_ip TEXT,
             created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS service_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_no TEXT,
-            service_date TEXT,
-            service_type TEXT,
-            description TEXT,
-            technician TEXT,
-            status TEXT DEFAULT 'Completed',
-            cost TEXT,
-            remarks TEXT,
-            logged_by TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS machine_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_no TEXT,
-            employee_name TEXT,
-            assigned_date TEXT,
-            returned_date TEXT,
-            remarks TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS password_resets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            otp TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            used INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS stock_dashboard (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            status TEXT NOT NULL,
-            model TEXT NOT NULL,
-            count INTEGER DEFAULT 0,
-            UNIQUE(status, model)
-        );
-
-        CREATE TABLE IF NOT EXISTS service_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_no TEXT,
-            employee_id INTEGER,
-            employee_name TEXT,
-            service_type TEXT,
-            description TEXT,
-            remarks TEXT,
-            status TEXT DEFAULT 'Pending',
-            assigned_to_id INTEGER,
-            assigned_to_name TEXT,
+            updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS service_history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_no TEXT, service_date TEXT,
+            service_type TEXT, description TEXT, technician TEXT,
+            status TEXT DEFAULT 'Completed', cost TEXT, remarks TEXT, logged_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS service_requests(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_no TEXT,
+            employee_id INTEGER, employee_name TEXT, service_type TEXT,
+            description TEXT, remarks TEXT, status TEXT DEFAULT 'Pending',
+            assigned_to_id INTEGER, assigned_to_name TEXT,
             created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS chat_messages (
+            updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS chat_messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER,
+            sender_id INTEGER, sender_name TEXT, sender_role TEXT, message TEXT,
+            created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS stock_dashboard(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER,
-            sender_id INTEGER,
-            sender_name TEXT,
-            sender_role TEXT,
-            message TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
+            status TEXT NOT NULL, model TEXT NOT NULL, count INTEGER DEFAULT 0,
+            UNIQUE(status,model));
     ''')
-
-    # Default admin
+    try: c.execute("ALTER TABLE users ADD COLUMN notification_prefs TEXT DEFAULT '{}'")
+    except: pass
     c.execute("SELECT id FROM users WHERE username='admin'")
     if not c.fetchone():
-        c.execute("INSERT INTO users (username, password, role, employee_name) VALUES (?, ?, ?, ?)",
-                  ('admin', 'admin123', 'admin', 'Administrator'))
+        c.execute("INSERT INTO users(username,password,role,employee_name) VALUES(?,?,?,?)",
+                  ('admin','admin123','admin','Administrator'))
+    conn.commit(); conn.close()
 
-    # Seed initial stock dashboard data
-    c.execute("SELECT COUNT(*) FROM stock_dashboard")
-    if c.fetchone()[0] == 0:
-        seed = [
-            ('Assigned',  'Dell LATITUDE 7480',     3),
-            ('DEAD',      'DELL Inspiron N5010',     1),
-            ('DEAD',      'Dell LATITUDE 7480',      2),
-            ('DEAD',      'DELL Vostro 3558',        8),
-            ('DEAD',      'Lenovo B40-80',           5),
-            ('DEAD',      'LENOVO V310',             2),
-            ('IT Stock',  'DELL LATITUDE 3400',      3),
-            ('IT Stock',  'DELL LATITUDE 3410',      2),
-            ('IT Stock',  'Dell LATITUDE 7480',      6),
-            ('IT Stock',  'DELL Vostro 3558',        1),
-            ('IT Stock',  'Lenovo B40-80',           4),
-            ('IT Stock',  'LENOVO V130',             2),
-            ('IT Stock',  'LENOVO V310',            12),
-            ('Service',   'Dell LATITUDE 7480',      3),
-            ('To Check',  'DELL LATITUDE 3400',      4),
-            ('To Check',  'DELL LATITUDE 3410',      8),
-            ('To Check',  'Dell Latitude 5310',      1),
-            ('To Check',  'Dell LATITUDE 7480',     75),
-            ('To Check',  'DELL LATITUDE E7450',     1),
-            ('To Check',  'DELL Vostro 3558',        1),
-            ('To Check',  'LENOVO THINKPAD T450',   19),
-            ('To Check',  'Lenovo B40-80',           1),
-            ('To Check',  'LENOVO V130',             8),
-            ('To Check',  'LENOVO V310',            18),
-        ]
-        c.executemany("INSERT OR IGNORE INTO stock_dashboard (status, model, count) VALUES (?,?,?)", seed)
+# ─── Email ─────────────────────────────────────────────────────────────────────
 
-    # Add notification_prefs column if not present (migration)
+def get_smtp(): cfg=configparser.ConfigParser();cfg.read(CONFIG_PATH);return cfg['SMTP'] if 'SMTP' in cfg else {}
+def get_nc():
+    cfg=configparser.ConfigParser();cfg.read(CONFIG_PATH)
+    s=cfg['NOTIFICATIONS'] if 'NOTIFICATIONS' in cfg else {}
+    b=lambda k:s.get(k,'true').lower()!='false'
+    return {k:b(k) for k in ['notify_new_request','notify_employee_action',
+        'notify_technician_assigned','notify_status_employee','notify_status_admin','notify_chat']}
+
+def send_email(to, subj, html):
+    c=get_smtp();h=c.get('smtp_host','');p=int(c.get('smtp_port',587))
+    u=c.get('smtp_user','');pw=c.get('smtp_password','');fn=c.get('from_name','IT Tracker')
+    if not u: return False,'SMTP not configured'
+    if isinstance(to,str): to=[to]
+    to=[e for e in to if e]
+    if not to: return False,'No recipients'
+    msg=MIMEMultipart('alternative');msg['Subject']=subj;msg['From']=f'{fn} <{u}>';msg['To']=', '.join(to)
+    msg.attach(MIMEText(html,'html'))
     try:
-        c.execute("ALTER TABLE users ADD COLUMN notification_prefs TEXT DEFAULT '{}'")
-    except Exception:
-        pass
+        with smtplib.SMTP(h,p,timeout=10) as s: s.ehlo();s.starttls();s.login(u,pw);s.sendmail(u,to,msg.as_string())
+        return True,'Sent'
+    except Exception as e: return False,str(e)
 
-    conn.commit()
-    conn.close()
+def status_email_html(name,status,rid,stype,asset):
+    c={'In Progress':'#f59e0b','Hold':'#6b7280','Completed':'#22c55e','Accepted':'#22c55e','Declined':'#ef4444'}.get(status,'#374151')
+    return f"<div style='font-family:Segoe UI,sans-serif;max-width:540px;margin:auto'><div style='background:linear-gradient(135deg,#0f3460,#533483);padding:22px;text-align:center'><h2 style='color:#fff;margin:0'>Request #{rid} — {status}</h2></div><div style='padding:24px;border:1px solid #e2e8f0'><p>Hi <b>{name}</b>, your request status is now <b style='color:{c}'>{status}</b>.</p><p>Asset: {asset} | Issue: {stype}</p></div></div>"
 
+def chat_email_html(sender,role,msg,rid,stype):
+    rl={'admin':'Admin','technician':'Technician','user':'Employee'}.get(role,role)
+    return f"<div style='font-family:Segoe UI,sans-serif;max-width:540px;margin:auto'><div style='background:linear-gradient(135deg,#0f3460,#533483);padding:22px;text-align:center'><h2 style='color:#fff;margin:0'>New Message — Request #{rid}</h2></div><div style='padding:24px;border:1px solid #e2e8f0'><p>From <b>{sender}</b> ({rl}) on Request #{rid} ({stype}):</p><div style='background:#f1f5f9;border-left:4px solid #533483;padding:12px;margin:14px 0'>{msg}</div></div></div>"
 
-def import_excel():
-    if not os.path.exists(EXCEL_PATH):
-        return
+# ─── HTML helpers ──────────────────────────────────────────────────────────────
+
+def panel(title, icon, body_html, actions_html=""):
+    hdr_actions = f'<div class="d-flex gap-2">{actions_html}</div>' if actions_html else ""
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header d-flex justify-content-between align-items-center">
+        <div class="panel-title"><i class="{icon}"></i> {title}</div>
+        {hdr_actions}
+      </div>
+      <div class="panel-body">{body_html}</div>
+    </div>""", unsafe_allow_html=True)
+
+STATUS_BADGE = {
+    'Pending':'<span class="badge bg-warning text-dark">Pending</span>',
+    'Accepted':'<span class="badge bg-success">Accepted</span>',
+    'Declined':'<span class="badge bg-danger">Declined</span>',
+    'In Progress':'<span class="badge bg-primary">In Progress</span>',
+    'Hold':'<span class="badge bg-secondary">Hold</span>',
+    'Completed':'<span class="badge bg-success">Completed</span>',
+}
+def sbadge(s): return STATUS_BADGE.get(s, f'<span class="badge bg-secondary">{s}</span>')
+
+# ─── Auth ──────────────────────────────────────────────────────────────────────
+
+def page_login(logo_b64):
+    logo_tag = f'<img src="data:image/jpeg;base64,{logo_b64}" style="height:40px;margin-bottom:16px">' if logo_b64 else ""
+    st.markdown(f"""
+    <div style="min-height:100vh;background:linear-gradient(135deg,#0f3460 0%,#533483 100%);
+         display:flex;align-items:center;justify-content:center;padding:40px 16px">
+      <div style="background:#fff;border-radius:20px;box-shadow:0 25px 50px rgba(0,0,0,.25);
+           padding:40px 36px;width:100%;max-width:420px;text-align:center">
+        {logo_tag}
+        <h2 style="color:#0f3460;font-weight:800;margin-bottom:4px">IT Asset Tracker</h2>
+        <p style="color:#64748b;margin-bottom:28px">Qualesce Technology Solutions</p>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 1.2, 1])
+    with col:
+        with st.form("login_form"):
+            u = st.text_input("", placeholder="Username or Email", label_visibility="collapsed")
+            p = st.text_input("", placeholder="Password", type="password", label_visibility="collapsed")
+            btn = st.form_submit_button("Sign In →", use_container_width=True)
+        if btn:
+            conn = get_db()
+            user = conn.execute(
+                "SELECT * FROM users WHERE (LOWER(email)=? OR LOWER(username)=?) AND password=?",
+                (u.strip().lower(), u.strip().lower(), p.strip())).fetchone()
+            conn.close()
+            if user:
+                st.session_state.update(logged_in=True, user_id=user['id'],
+                    username=user['username'], role=user['role'],
+                    employee_name=user['employee_name'] or user['username'],
+                    user_email=user['email'] or '', page='dashboard')
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+def do_logout():
+    for k in list(st.session_state.keys()): del st.session_state[k]
+    st.rerun()
+
+# ─── Sidebar ───────────────────────────────────────────────────────────────────
+
+def sidebar_nav(logo_b64):
+    role = st.session_state.role
+    name = st.session_state.employee_name
+
+    logo_tag = f'<img src="data:image/jpeg;base64,{logo_b64}" style="height:28px;object-fit:contain;max-width:100%">' if logo_b64 else "💻"
+    badge_style = {'admin':'background:#f59e0b;color:#1e293b','technician':'background:#22c55e;color:#fff','user':'background:#38bdf8;color:#fff'}.get(role,'')
+    badge_label = role.upper()
+
+    st.sidebar.markdown(f"""
+    <div style="padding:14px;border-bottom:1px solid rgba(255,255,255,.1);text-align:center">
+      <div style="background:#fff;border-radius:10px;padding:8px 14px">{logo_tag}</div>
+    </div>
+    <div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.1)">
+      <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#533483,#0f3460);
+           display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:1.1rem;margin-right:10px;vertical-align:middle">
+        {name[0].upper()}
+      </div>
+      <span style="font-weight:600;font-size:.95rem;vertical-align:middle">{name}</span><br>
+      <span style="display:inline-block;margin-top:4px;padding:2px 10px;border-radius:20px;font-size:.7rem;font-weight:700;{badge_style}">{badge_label}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    def nav(label, page):
+        if st.sidebar.button(label, key=f'nav_{page}', use_container_width=True):
+            st.session_state.page = page
+            st.session_state.pop('req_id', None)
+            st.rerun()
+
+    if role == 'admin':
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Dashboard</div>', unsafe_allow_html=True)
+        nav('📊  Dashboard', 'dashboard')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Assets</div>', unsafe_allow_html=True)
+        nav('💻  All Assets', 'assets')
+        nav('👥  Employees', 'employees')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Service</div>', unsafe_allow_html=True)
+        nav('📥  Service Requests', 'service_requests')
+        nav('🔧  Service History', 'services')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Management</div>', unsafe_allow_html=True)
+        nav('👤  Manage Users', 'users')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Settings</div>', unsafe_allow_html=True)
+        nav('📧  Email Config', 'email_config')
+    elif role == 'technician':
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">My Tasks</div>', unsafe_allow_html=True)
+        nav('📊  Dashboard', 'dashboard')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Settings</div>', unsafe_allow_html=True)
+        nav('🔔  Email Preferences', 'email_prefs')
+    else:
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">My Portal</div>', unsafe_allow_html=True)
+        nav('🏠  My Dashboard', 'dashboard')
+        nav('🎫  My Requests', 'my_requests')
+        nav('🔧  Request Service', 'request_service')
+        st.sidebar.markdown('<div style="padding:6px 14px 2px;font-size:.7rem;font-weight:700;letter-spacing:.08em;color:#94a3b8;text-transform:uppercase">Settings</div>', unsafe_allow_html=True)
+        nav('🔔  Email Preferences', 'email_prefs')
+
+    st.sidebar.markdown('<hr style="margin:10px 0;border-color:rgba(255,255,255,.1)">', unsafe_allow_html=True)
+    if st.sidebar.button('🚪  Logout', use_container_width=True): do_logout()
+
+# ─── Admin Dashboard ───────────────────────────────────────────────────────────
+
+def pg_admin_dashboard():
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM assets")
-    if c.fetchone()[0] > 0:
-        conn.close()
-        return  # already imported
-
-    try:
-        wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True)
-        ws = wb['Hardware']
-        imported = 0
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            def s(v): return str(v).strip() if v is not None else ''
-            def d(v):
-                if v is None: return ''
-                try:
-                    return str(v.date()) if hasattr(v, 'date') else str(v)
-                except:
-                    return str(v)
-
-            asset_no = s(row[1])
-            if not asset_no:
-                continue
-            # Skip phantom/garbage rows: asset_no exists but no meaningful data
-            if not row[0] and not row[2] and not row[5]:
-                continue
-
-            c.execute('''INSERT OR IGNORE INTO assets
-                (asset_status, asset_no, login_id, serial_no, transfer_history,
-                 model, years, resolution, sn, model2,
-                 warranty_start, warranty_end, warranty_type, warranty_status,
-                 lan_mac, lan_ip, wireless_mac, wan_ip,
-                 admin_usb, bios_password, admin_password,
-                 spiceworks, windows_update, unwanted_apps,
-                 processor, ram, hdd, office365, sharepoint, onedrive,
-                 worksoft, ia, sql_version, system_cleanup)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (s(row[0]), asset_no, s(row[2]), s(row[3]), s(row[4]),
-                 s(row[5]), s(row[6]), s(row[7]), s(row[8]), s(row[10]),
-                 d(row[11]), d(row[12]), s(row[13]), s(row[14]),
-                 s(row[15]), s(row[16]), s(row[17]), s(row[18]),
-                 s(row[19]), s(row[20]), s(row[21]),
-                 s(row[22]), s(row[23]), s(row[24]),
-                 s(row[25]), s(row[26]), s(row[27]), s(row[28]),
-                 s(row[29]), s(row[30]), s(row[31]), s(row[32]),
-                 s(row[33]), s(row[37]) if len(row) > 37 else ''))
-
-            # Parse machine history from transfer_history
-            transfer = s(row[4])
-            if transfer:
-                names = [n.strip() for n in transfer.replace(' - ', '-').split('-') if n.strip()]
-                for name in names:
-                    c.execute('''INSERT INTO machine_history (asset_no, employee_name, remarks)
-                                 VALUES (?, ?, ?)''', (asset_no, name, 'Imported from Excel'))
-
-            # Create user account for assigned employee
-            login_id = s(row[2])
-            if login_id and login_id not in ('IT Stock', 'DEAD', ''):
-                c.execute("SELECT id FROM users WHERE employee_name=?", (login_id,))
-                if not c.fetchone():
-                    username = login_id.lower().replace(' ', '.').replace('/', '')[:20]
-                    c.execute("SELECT id FROM users WHERE username=?", (username,))
-                    if not c.fetchone():
-                        c.execute("INSERT INTO users (username, password, role, employee_name) VALUES (?,?,?,?)",
-                                  (username, 'pass123', 'user', login_id))
-            imported += 1
-
-        wb.close()
-        conn.commit()
-        print(f"Imported {imported} assets from Excel")
-    except Exception as e:
-        print(f"Excel import error: {e}")
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated
-
-
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        if session.get('role') != 'admin':
-            flash('Admin access required.', 'danger')
-            return redirect(url_for('user_dashboard'))
-        return f(*args, **kwargs)
-    return decorated
-
-
-def technician_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        if session.get('role') != 'technician':
-            flash('Technician access required.', 'danger')
-            if session.get('role') == 'admin':
-                return redirect(url_for('admin_dashboard'))
-            return redirect(url_for('user_dashboard'))
-        return f(*args, **kwargs)
-    return decorated
-
-
-# ---------------------------------------------------------------------------
-# Auth routes
-# ---------------------------------------------------------------------------
-
-@app.route('/')
-def index():
-    if 'user_id' in session:
-        role = session.get('role')
-        if role == 'admin':
-            return redirect(url_for('admin_dashboard'))
-        if role == 'technician':
-            return redirect(url_for('technician_dashboard'))
-        return redirect(url_for('user_dashboard'))
-    return redirect(url_for('login'))
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        email    = request.form['email'].strip().lower()
-        password = request.form['password'].strip()
-        conn = get_db()
-        # Match by email or username (fallback for admin)
-        user = conn.execute(
-            "SELECT * FROM users WHERE (LOWER(email)=? OR LOWER(username)=?) AND password=?",
-            (email, email, password)).fetchone()
-        conn.close()
-        if user:
-            session['user_id']       = user['id']
-            session['username']      = user['username']
-            session['role']          = user['role']
-            session['employee_name'] = user['employee_name'] or user['username']
-            session['user_email']    = user['email'] or ''
-            if user['role'] == 'admin':
-                return redirect(url_for('admin_dashboard'))
-            if user['role'] == 'technician':
-                return redirect(url_for('technician_dashboard'))
-            return redirect(url_for('user_dashboard'))
-        flash('Invalid email or password.', 'danger')
-    return render_template('login.html')
-
-
-@app.route('/forgot-password', methods=['GET', 'POST'])
-def forgot_password():
-    if request.method == 'POST':
-        email = request.form['email'].strip().lower()
-        conn  = get_db()
-        user  = conn.execute("SELECT * FROM users WHERE LOWER(email)=?", (email,)).fetchone()
-        if not user:
-            conn.close()
-            flash('No account found with that email address.', 'danger')
-            return render_template('forgot_password.html')
-
-        otp      = str(random.randint(100000, 999999))
-        expires  = (datetime.now() + timedelta(minutes=10)).isoformat()
-        # Invalidate previous OTPs for this email
-        conn.execute("UPDATE password_resets SET used=1 WHERE email=?", (email,))
-        conn.execute("INSERT INTO password_resets (email, otp, expires_at) VALUES (?,?,?)",
-                     (email, otp, expires))
-        conn.commit()
-        conn.close()
-
-        ok, msg = send_otp_email(email, otp, user['employee_name'] or user['username'])
-        if ok:
-            session['reset_email'] = email
-            flash(f'A 6-digit code has been sent to {email}', 'success')
-            return redirect(url_for('verify_otp'))
-        else:
-            # Dev fallback: show OTP on screen if SMTP not configured
-            flash(f'Email not configured — use this code to reset: {otp}', 'warning')
-            session['reset_email'] = email
-            return redirect(url_for('verify_otp'))
-
-    return render_template('forgot_password.html')
-
-
-@app.route('/verify-otp', methods=['GET', 'POST'])
-def verify_otp():
-    email = session.get('reset_email')
-    if not email:
-        return redirect(url_for('forgot_password'))
-
-    if request.method == 'POST':
-        entered = request.form['otp'].strip()
-        conn    = get_db()
-        record  = conn.execute(
-            "SELECT * FROM password_resets WHERE email=? AND used=0 ORDER BY id DESC LIMIT 1",
-            (email,)).fetchone()
-
-        if not record:
-            conn.close()
-            flash('No active reset code found. Please request again.', 'danger')
-            return redirect(url_for('forgot_password'))
-
-        if datetime.fromisoformat(record['expires_at']) < datetime.now():
-            conn.execute("UPDATE password_resets SET used=1 WHERE id=?", (record['id'],))
-            conn.commit()
-            conn.close()
-            flash('Code has expired. Please request a new one.', 'danger')
-            return redirect(url_for('forgot_password'))
-
-        if record['otp'] != entered:
-            conn.close()
-            flash('Incorrect code. Please try again.', 'danger')
-            return render_template('verify_otp.html', email=email)
-
-        # Mark used and allow reset
-        conn.execute("UPDATE password_resets SET used=1 WHERE id=?", (record['id'],))
-        conn.commit()
-        conn.close()
-        session['reset_verified'] = True
-        return redirect(url_for('reset_password'))
-
-    return render_template('verify_otp.html', email=email)
-
-
-@app.route('/reset-password', methods=['GET', 'POST'])
-def reset_password():
-    email = session.get('reset_email')
-    if not email or not session.get('reset_verified'):
-        return redirect(url_for('forgot_password'))
-
-    if request.method == 'POST':
-        new_pass  = request.form['password'].strip()
-        confirm   = request.form['confirm'].strip()
-        if new_pass != confirm:
-            flash('Passwords do not match.', 'danger')
-            return render_template('reset_password.html')
-        if len(new_pass) < 6:
-            flash('Password must be at least 6 characters.', 'danger')
-            return render_template('reset_password.html')
-
-        conn = get_db()
-        conn.execute("UPDATE users SET password=? WHERE LOWER(email)=?", (new_pass, email))
-        conn.commit()
-        conn.close()
-
-        session.pop('reset_email', None)
-        session.pop('reset_verified', None)
-        flash('Password updated successfully! Please log in.', 'success')
-        return redirect(url_for('login'))
-
-    return render_template('reset_password.html')
-
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-
-# ---------------------------------------------------------------------------
-# Admin routes
-# ---------------------------------------------------------------------------
-
-@app.route('/admin')
-@admin_required
-def admin_dashboard():
-    conn = get_db()
-    # Count per status dynamically
-    status_counts = {r[0]: r[1] for r in conn.execute(
-        "SELECT asset_status, COUNT(*) FROM assets GROUP BY asset_status").fetchall()}
-    stats = {
-        'total':    sum(status_counts.values()),
-        'assigned': status_counts.get('Assigned', 0),
-        'stock':    status_counts.get('IT Stock', 0) + status_counts.get('ITStock', 0),
-        'dead':     status_counts.get('DEAD', 0),
-        'to_check': status_counts.get('To Check', 0),
-        'yashwanth': status_counts.get('Yashwanth', 0),
+    sc = {r[0]:r[1] for r in conn.execute("SELECT asset_status,COUNT(*) FROM assets GROUP BY asset_status").fetchall()}
+    total   = sum(sc.values())
+    stats   = {
+        'total':    total,
+        'assigned': sc.get('Assigned',0),
+        'stock':    sc.get('IT Stock',0)+sc.get('ITStock',0),
+        'dead':     sc.get('DEAD',0),
+        'to_check': sc.get('To Check',0),
+        'yashwanth':sc.get('Yashwanth',0),
         'users':    conn.execute("SELECT COUNT(*) FROM users WHERE role='user'").fetchone()[0],
         'services': conn.execute("SELECT COUNT(*) FROM service_history").fetchone()[0],
     }
-    recent = conn.execute(
-        "SELECT * FROM assets ORDER BY updated_at DESC LIMIT 10").fetchall()
-
-    # Build stock dashboard pivot
-    stock_rows = conn.execute(
-        "SELECT status, model, count FROM stock_dashboard ORDER BY model").fetchall()
+    pending = conn.execute("SELECT COUNT(*) FROM service_requests WHERE status='Pending'").fetchone()[0]
+    stock_rows = conn.execute("SELECT status,model,count FROM stock_dashboard ORDER BY status,model").fetchall()
+    recent     = conn.execute("SELECT * FROM assets ORDER BY updated_at DESC LIMIT 10").fetchall()
     conn.close()
 
-    stock_models = []
-    stock_statuses_set = []
-    stock_data = {}
-    for row in stock_rows:
-        if row['model'] not in stock_models:
-            stock_models.append(row['model'])
-        if row['status'] not in stock_statuses_set:
-            stock_statuses_set.append(row['status'])
-        stock_data.setdefault(row['status'], {})[row['model']] = row['count']
-
-    # Standard statuses first, then any extras from actual data
-    standard = ['Assigned', 'IT Stock', 'Service', 'To Check', 'DEAD']
-    stock_statuses = [s for s in standard if s in stock_statuses_set] + \
-                     [s for s in stock_statuses_set if s not in standard]
-
-    return render_template('admin/dashboard.html', stats=stats, recent=recent,
-                           stock_models=stock_models, stock_data=stock_data,
-                           stock_statuses=stock_statuses)
-
-
-@app.route('/admin/assets')
-@admin_required
-def admin_assets():
-    search = request.args.get('q', '')
-    status = request.args.get('status', '')
-    conn = get_db()
-    query = "SELECT * FROM assets WHERE 1=1"
-    params = []
-    if search:
-        query += " AND (login_id LIKE ? OR asset_no LIKE ? OR model LIKE ? OR serial_no LIKE ?)"
-        params += [f'%{search}%'] * 4
-    if status:
-        query += " AND asset_status=?"
-        params.append(status)
-    query += " ORDER BY asset_no"
-    assets = conn.execute(query, params).fetchall()
-    conn.close()
-    return render_template('admin/assets.html', assets=assets, search=search, status=status)
-
-
-@app.route('/admin/employee/<login_id>')
-@admin_required
-def admin_employee_detail(login_id):
-    conn = get_db()
-    assets = conn.execute(
-        "SELECT * FROM assets WHERE login_id=? ORDER BY asset_no", (login_id,)).fetchall()
-    service_history = conn.execute(
-        """SELECT sh.*, a.model FROM service_history sh
-           JOIN assets a ON sh.asset_no = a.asset_no
-           WHERE a.login_id=? ORDER BY sh.service_date DESC""", (login_id,)).fetchall()
-    machine_hist = conn.execute(
-        """SELECT mh.* FROM machine_history mh
-           JOIN assets a ON mh.asset_no = a.asset_no
-           WHERE a.login_id=? ORDER BY mh.created_at DESC""", (login_id,)).fetchall()
-    # All history for this employee's name across all machines
-    all_machine_hist = conn.execute(
-        "SELECT mh.*, a.model FROM machine_history mh LEFT JOIN assets a ON mh.asset_no=a.asset_no WHERE mh.employee_name LIKE ? ORDER BY mh.created_at DESC",
-        (f'%{login_id}%',)).fetchall()
-    conn.close()
-    return render_template('admin/employee_detail.html',
-                           login_id=login_id,
-                           assets=assets,
-                           service_history=service_history,
-                           machine_history=all_machine_hist)
-
-
-@app.route('/admin/asset/<asset_no>')
-@admin_required
-def admin_asset_detail(asset_no):
-    conn = get_db()
-    asset = conn.execute("SELECT * FROM assets WHERE asset_no=?", (asset_no,)).fetchone()
-    service_history = conn.execute(
-        "SELECT * FROM service_history WHERE asset_no=? ORDER BY service_date DESC", (asset_no,)).fetchall()
-    machine_history = conn.execute(
-        "SELECT * FROM machine_history WHERE asset_no=? ORDER BY created_at DESC", (asset_no,)).fetchall()
-    conn.close()
-    if not asset:
-        flash('Asset not found.', 'danger')
-        return redirect(url_for('admin_assets'))
-    return render_template('admin/asset_detail.html',
-                           asset=asset,
-                           service_history=service_history,
-                           machine_history=machine_history)
-
-
-@app.route('/admin/asset/add', methods=['GET', 'POST'])
-@admin_required
-def admin_add_asset():
-    if request.method == 'POST':
-        f = request.form
-        conn = get_db()
-        try:
-            conn.execute('''INSERT INTO assets
-                (asset_status, asset_no, login_id, serial_no, transfer_history,
-                 model, years, resolution, warranty_start, warranty_end,
-                 warranty_type, warranty_status, lan_mac, lan_ip,
-                 processor, ram, hdd, office365, windows_update, system_cleanup)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (f.get('asset_status'), f.get('asset_no'), f.get('login_id'),
-                 f.get('serial_no'), f.get('transfer_history'),
-                 f.get('model'), f.get('years'), f.get('resolution'),
-                 f.get('warranty_start'), f.get('warranty_end'),
-                 f.get('warranty_type'), f.get('warranty_status'),
-                 f.get('lan_mac'), f.get('lan_ip'),
-                 f.get('processor'), f.get('ram'), f.get('hdd'),
-                 f.get('office365'), f.get('windows_update'), f.get('system_cleanup')))
-            conn.commit()
-            flash('Asset added successfully!', 'success')
-            return redirect(url_for('admin_assets'))
-        except Exception as e:
-            flash(f'Error: {e}', 'danger')
-        finally:
-            conn.close()
-    return render_template('admin/add_asset.html')
-
-
-@app.route('/admin/asset/edit/<asset_no>', methods=['GET', 'POST'])
-@admin_required
-def admin_edit_asset(asset_no):
-    conn = get_db()
-    asset = conn.execute("SELECT * FROM assets WHERE asset_no=?", (asset_no,)).fetchone()
-    if not asset:
-        flash('Asset not found.', 'danger')
-        conn.close()
-        return redirect(url_for('admin_assets'))
-    if request.method == 'POST':
-        f = request.form
-        conn.execute('''UPDATE assets SET
-            asset_status=?, login_id=?, serial_no=?, transfer_history=?,
-            model=?, years=?, resolution=?, warranty_start=?, warranty_end=?,
-            warranty_type=?, warranty_status=?, lan_mac=?, lan_ip=?,
-            processor=?, ram=?, hdd=?, office365=?, windows_update=?,
-            system_cleanup=?, updated_at=?
-            WHERE asset_no=?''',
-            (f.get('asset_status'), f.get('login_id'), f.get('serial_no'),
-             f.get('transfer_history'), f.get('model'), f.get('years'),
-             f.get('resolution'), f.get('warranty_start'), f.get('warranty_end'),
-             f.get('warranty_type'), f.get('warranty_status'),
-             f.get('lan_mac'), f.get('lan_ip'),
-             f.get('processor'), f.get('ram'), f.get('hdd'),
-             f.get('office365'), f.get('windows_update'), f.get('system_cleanup'),
-             datetime.now().isoformat(), asset_no))
-        conn.commit()
-        conn.close()
-        flash('Asset updated!', 'success')
-        return redirect(url_for('admin_asset_detail', asset_no=asset_no))
-    conn.close()
-    return render_template('admin/edit_asset.html', asset=asset)
-
-
-@app.route('/admin/service/add', methods=['GET', 'POST'])
-@admin_required
-def admin_add_service():
-    conn = get_db()
-    if request.method == 'POST':
-        f = request.form
-        conn.execute('''INSERT INTO service_history
-            (asset_no, service_date, service_type, description, technician, status, cost, remarks, logged_by)
-            VALUES (?,?,?,?,?,?,?,?,?)''',
-            (f.get('asset_no'), f.get('service_date'), f.get('service_type'),
-             f.get('description'), f.get('technician'), f.get('status'),
-             f.get('cost'), f.get('remarks'), session['employee_name']))
-        conn.commit()
-        conn.close()
-        flash('Service record added!', 'success')
-        return redirect(url_for('admin_services'))
-    assets = conn.execute("SELECT asset_no, model, login_id FROM assets ORDER BY asset_no").fetchall()
-    conn.close()
-    return render_template('admin/add_service.html', assets=assets, now=datetime.now().strftime('%Y-%m-%d'))
-
-
-@app.route('/admin/services')
-@admin_required
-def admin_services():
-    search = request.args.get('q', '')
-    conn = get_db()
-    query = """SELECT sh.*, a.model, a.login_id FROM service_history sh
-               LEFT JOIN assets a ON sh.asset_no=a.asset_no WHERE 1=1"""
-    params = []
-    if search:
-        query += " AND (sh.asset_no LIKE ? OR sh.description LIKE ? OR a.login_id LIKE ?)"
-        params += [f'%{search}%'] * 3
-    query += " ORDER BY sh.service_date DESC"
-    services = conn.execute(query, params).fetchall()
-    conn.close()
-    return render_template('admin/services.html', services=services, search=search)
-
-
-@app.route('/admin/users')
-@admin_required
-def admin_users():
-    conn = get_db()
-    users = conn.execute("SELECT * FROM users ORDER BY role, username").fetchall()
-    conn.close()
-    return render_template('admin/users.html', users=users)
-
-
-@app.route('/admin/users/add', methods=['GET', 'POST'])
-@admin_required
-def admin_add_user():
-    if request.method == 'POST':
-        f = request.form
-        conn = get_db()
-        try:
-            conn.execute("INSERT INTO users (username, password, role, employee_name, email, department) VALUES (?,?,?,?,?,?)",
-                         (f.get('username'), f.get('password'), f.get('role'),
-                          f.get('employee_name'), f.get('email'), f.get('department')))
-            conn.commit()
-            flash('User created!', 'success')
-            return redirect(url_for('admin_users'))
-        except Exception as e:
-            flash(f'Error: {e}', 'danger')
-        finally:
-            conn.close()
-    return render_template('admin/add_user.html')
-
-
-@app.route('/admin/users/edit/<int:user_id>', methods=['GET', 'POST'])
-@admin_required
-def admin_edit_user(user_id):
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    if not user:
-        conn.close()
-        flash('User not found.', 'danger')
-        return redirect(url_for('admin_users'))
-    if request.method == 'POST':
-        f = request.form
-        conn.execute(
-            "UPDATE users SET employee_name=?, email=?, department=?, role=?, password=? WHERE id=?",
-            (f.get('employee_name'), f.get('email'), f.get('department'),
-             f.get('role'), f.get('password'), user_id))
-        conn.commit()
-        conn.close()
-        flash('User updated!', 'success')
-        return redirect(url_for('admin_users'))
-    conn.close()
-    return render_template('admin/edit_user.html', user=user)
-
-
-@app.route('/admin/users/set-email', methods=['POST'])
-@admin_required
-def admin_set_email_bulk():
-    """Quick inline email update from users table."""
-    user_id = request.form.get('user_id')
-    email   = request.form.get('email', '').strip()
-    conn = get_db()
-    conn.execute("UPDATE users SET email=? WHERE id=?", (email, user_id))
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True})
-
-
-@app.route('/admin/employees')
-@admin_required
-def admin_employees():
-    conn = get_db()
-    employees = conn.execute(
-        """SELECT login_id, COUNT(*) as asset_count,
-           GROUP_CONCAT(model, ', ') as models,
-           GROUP_CONCAT(asset_no, ', ') as asset_nos,
-           MAX(asset_status) as latest_status
-           FROM assets
-           WHERE login_id NOT IN ('IT Stock', 'DEAD', '')
-           GROUP BY login_id
-           ORDER BY login_id""").fetchall()
-    conn.close()
-    return render_template('admin/employees.html', employees=employees)
-
-
-@app.route('/admin/machine-history/add', methods=['POST'])
-@admin_required
-def admin_add_machine_history():
-    f = request.form
-    conn = get_db()
-    conn.execute('''INSERT INTO machine_history
-        (asset_no, employee_name, assigned_date, returned_date, remarks)
-        VALUES (?,?,?,?,?)''',
-        (f.get('asset_no'), f.get('employee_name'),
-         f.get('assigned_date'), f.get('returned_date'), f.get('remarks')))
-    conn.commit()
-    conn.close()
-    flash('Machine history added!', 'success')
-    return redirect(request.referrer or url_for('admin_assets'))
-
-
-@app.route('/admin/sync-stock', methods=['POST'])
-@admin_required
-def admin_sync_stock():
-    from collections import defaultdict
-    conn = get_db()
-    rows = conn.execute('''
-        SELECT asset_status, model, COUNT(*) as cnt
-        FROM assets
-        WHERE asset_status IS NOT NULL AND asset_status != ''
-          AND model IS NOT NULL AND model != ''
-        GROUP BY asset_status, model
-    ''').fetchall()
-    agg = defaultdict(int)
-    for r in rows:
-        status = r['asset_status'].strip()
-        if status == 'ITStock':
-            status = 'IT Stock'
-        model = (r['model'] or '').strip()
-        if model:
-            agg[(status, model)] += r['cnt']
-    conn.execute("DELETE FROM stock_dashboard")
-    for (status, model), count in agg.items():
-        conn.execute("INSERT INTO stock_dashboard (status, model, count) VALUES (?,?,?)",
-                     (status, model, count))
-    conn.commit()
-    conn.close()
-    flash('Stock dashboard synced from actual asset data!', 'success')
-    return redirect(url_for('admin_dashboard'))
-
-
-@app.route('/admin/reimport', methods=['POST'])
-@admin_required
-def admin_reimport():
-    conn = get_db()
-    conn.execute("DELETE FROM assets")
-    conn.execute("DELETE FROM machine_history")
-    conn.commit()
-    conn.close()
-    import_excel()
-    flash('Excel data re-imported successfully!', 'success')
-    return redirect(url_for('admin_dashboard'))
-
-
-# ---------------------------------------------------------------------------
-# User routes
-# ---------------------------------------------------------------------------
-
-@app.route('/user')
-@login_required
-def user_dashboard():
-    if session.get('role') == 'admin':
-        return redirect(url_for('admin_dashboard'))
-    if session.get('role') == 'technician':
-        return redirect(url_for('technician_dashboard'))
-    employee_name = session['employee_name']
-    conn = get_db()
-    assets = conn.execute(
-        "SELECT * FROM assets WHERE login_id LIKE ? ORDER BY asset_no",
-        (f'%{employee_name}%',)).fetchall()
-    service_history = conn.execute(
-        """SELECT sh.*, a.model FROM service_history sh
-           JOIN assets a ON sh.asset_no=a.asset_no
-           WHERE a.login_id LIKE ? ORDER BY sh.service_date DESC LIMIT 10""",
-        (f'%{employee_name}%',)).fetchall()
-    machine_hist = conn.execute(
-        "SELECT mh.*, a.model FROM machine_history mh LEFT JOIN assets a ON mh.asset_no=a.asset_no WHERE mh.employee_name LIKE ? ORDER BY mh.created_at DESC",
-        (f'%{employee_name}%',)).fetchall()
-    conn.close()
-    return render_template('user/dashboard.html',
-                           assets=assets,
-                           service_history=service_history,
-                           machine_history=machine_hist,
-                           employee_name=employee_name)
-
-
-@app.route('/user/asset/<asset_no>')
-@login_required
-def user_asset_detail(asset_no):
-    conn = get_db()
-    asset = conn.execute("SELECT * FROM assets WHERE asset_no=?", (asset_no,)).fetchone()
-    service_history = conn.execute(
-        "SELECT * FROM service_history WHERE asset_no=? ORDER BY service_date DESC",
-        (asset_no,)).fetchall()
-    machine_history = conn.execute(
-        "SELECT * FROM machine_history WHERE asset_no=? ORDER BY created_at DESC",
-        (asset_no,)).fetchall()
-    conn.close()
-    return render_template('user/asset_detail.html',
-                           asset=asset,
-                           service_history=service_history,
-                           machine_history=machine_history)
-
-
-@app.route('/user/request-service', methods=['GET', 'POST'])
-@login_required
-def user_request_service():
-    if session.get('role') in ('admin', 'technician'):
-        return redirect(url_for('admin_dashboard'))
-    employee_name = session['employee_name']
-    conn = get_db()
-    if request.method == 'POST':
-        f = request.form
-        cur = conn.execute(
-            '''INSERT INTO service_requests (asset_no, employee_id, employee_name, service_type, description, remarks, status)
-               VALUES (?,?,?,?,?,?,?)''',
-            (f.get('asset_no'), session['user_id'], employee_name,
-             f.get('service_type'), f.get('description'), f.get('remarks'), 'Pending'))
-        req_id = cur.lastrowid
-        conn.commit()
-        admins = conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
-        admin_emails = [a['email'] for a in admins if a['email']]
-        conn.close()
-        if admin_emails and get_notification_prefs()['new_request']:
-            html = f"""
-            <div style="font-family:Segoe UI,sans-serif;max-width:560px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-              <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-                <h2 style="color:#fff;margin:0;font-size:1.2rem">New Service Request #{req_id}</h2>
-              </div>
-              <div style="padding:28px 30px">
-                <p style="color:#374151">A new service request requires your attention.</p>
-                <table style="width:100%;border-collapse:collapse;margin:16px 0">
-                  <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;width:40%;font-weight:600">Employee</td><td style="padding:8px 12px;color:#1e293b">{employee_name}</td></tr>
-                  <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Asset No</td><td style="padding:8px 12px;color:#1e293b">{f.get('asset_no','-')}</td></tr>
-                  <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;font-weight:600">Issue Type</td><td style="padding:8px 12px;color:#1e293b">{f.get('service_type','-')}</td></tr>
-                  <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Description</td><td style="padding:8px 12px;color:#1e293b">{f.get('description','-')}</td></tr>
-                </table>
-                <p style="color:#6b7280;font-size:0.9rem">Log in to the Admin Portal to accept or decline this request.</p>
-              </div>
-              <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-            </div>"""
-            send_notification_email(admin_emails, f'New Service Request #{req_id} from {employee_name}', html)
-        flash('Service request submitted! You will be notified once reviewed.', 'success')
-        return redirect(url_for('user_my_requests'))
-    assets = conn.execute(
-        "SELECT asset_no, model FROM assets WHERE login_id LIKE ? ORDER BY asset_no",
-        (f'%{employee_name}%',)).fetchall()
-    conn.close()
-    return render_template('user/request_service.html', assets=assets)
-
-
-# ---------------------------------------------------------------------------
-# Stock Dashboard import / template
-# ---------------------------------------------------------------------------
-
-@app.route('/admin/stock-import', methods=['POST'])
-@admin_required
-def admin_stock_import():
-    file = request.files.get('excel_file')
-    if not file or not file.filename.lower().endswith(('.xlsx', '.xls')):
-        flash('Please upload a valid Excel file (.xlsx or .xls).', 'danger')
-        return redirect(url_for('admin_dashboard'))
-    try:
-        wb = openpyxl.load_workbook(file, data_only=True)
-        sheet_name = 'Stock Dashboard' if 'Stock Dashboard' in wb.sheetnames else wb.sheetnames[0]
-        ws = wb[sheet_name]
-
-        # Locate the "Row Labels" header row
-        header_row_num = None
-        for row in ws.iter_rows():
-            for cell in row:
-                if str(cell.value).strip() == 'Row Labels':
-                    header_row_num = cell.row
-                    break
-            if header_row_num:
-                break
-
-        if not header_row_num:
-            flash('Could not find "Row Labels" in the file. Please use the provided template.', 'danger')
-            return redirect(url_for('admin_dashboard'))
-
-        # Collect model names from header row (skip col 1 and "Grand Total")
-        header_cells = list(ws.iter_rows(min_row=header_row_num, max_row=header_row_num, values_only=False))[0]
-        models = [(cell.column, str(cell.value).strip())
-                  for cell in header_cells[1:]
-                  if cell.value and str(cell.value).strip() not in ('Grand Total', '')]
-
-        # Parse data rows
-        conn = get_db()
-        conn.execute("DELETE FROM stock_dashboard")
-        for row in ws.iter_rows(min_row=header_row_num + 1, values_only=False):
-            status = str(row[0].value).strip() if row[0].value else ''
-            if not status or status == 'Grand Total':
-                continue
-            for col_idx, model in models:
-                cell = ws.cell(row=row[0].row, column=col_idx)
-                try:
-                    count = int(cell.value or 0)
-                except (TypeError, ValueError):
-                    count = 0
-                if count > 0:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO stock_dashboard (status, model, count) VALUES (?,?,?)",
-                        (status, model, count))
-        conn.commit()
-        conn.close()
-        flash(f'Stock Dashboard imported from "{sheet_name}" sheet successfully!', 'success')
-    except Exception as e:
-        flash(f'Import error: {e}', 'danger')
-    return redirect(url_for('admin_dashboard'))
-
-
-@app.route('/admin/stock-template')
-@admin_required
-def admin_stock_template():
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = 'Stock Dashboard'
-
-    models = [
-        'DELL Inspiron N5010', 'DELL LATITUDE 3400', 'DELL LATITUDE 3410',
-        'Dell Latitude 5310', 'Dell LATITUDE 7480', 'DELL LATITUDE E7450',
-        'DELL Vostro 3558', 'LENOVO THINKPAD T450', 'Lenovo B40-80',
-        'LENOVO V130', 'LENOVO V310'
-    ]
-    statuses = ['Assigned', 'DEAD', 'IT Stock', 'Service', 'To Check']
-
-    header_fill  = PatternFill('solid', fgColor='1F3864')
-    total_fill   = PatternFill('solid', fgColor='D6E4F0')
-    thin_border  = Border(
-        left=Side(style='thin'), right=Side(style='thin'),
-        top=Side(style='thin'), bottom=Side(style='thin'))
-
-    # Row 3 — pivot label row
-    ws['A3'] = 'Count of Resolution'
-    ws['B3'] = 'Column Labels'
-
-    # Row 4 — header
-    ws.cell(row=4, column=1, value='Row Labels').font = Font(bold=True, color='FFFFFF')
-    ws.cell(row=4, column=1).fill = header_fill
-    ws.cell(row=4, column=1).alignment = Alignment(horizontal='center')
-    for ci, model in enumerate(models, start=2):
-        c = ws.cell(row=4, column=ci, value=model)
-        c.font = Font(bold=True, color='FFFFFF')
-        c.fill = header_fill
-        c.alignment = Alignment(horizontal='center', wrap_text=True)
-        ws.column_dimensions[c.column_letter].width = 16
-    gt_col = len(models) + 2
-    ws.cell(row=4, column=gt_col, value='Grand Total').font = Font(bold=True, color='FFFFFF')
-    ws.cell(row=4, column=gt_col).fill = header_fill
-    ws.cell(row=4, column=gt_col).alignment = Alignment(horizontal='center')
-    ws.column_dimensions['A'].width = 14
-
-    # Status rows
-    for ri, status in enumerate(statuses, start=5):
-        ws.cell(row=ri, column=1, value=status).font = Font(bold=True)
-        ws.cell(row=ri, column=1).border = thin_border
-        row_total = 0
-        for ci, _ in enumerate(models, start=2):
-            c = ws.cell(row=ri, column=ci, value=0)
-            c.alignment = Alignment(horizontal='center')
-            c.border = thin_border
-        ws.cell(row=ri, column=gt_col, value=0).font = Font(bold=True)
-        ws.cell(row=ri, column=gt_col).border = thin_border
-
-    # Grand Total row
-    gt_row = 5 + len(statuses)
-    ws.cell(row=gt_row, column=1, value='Grand Total').font = Font(bold=True)
-    ws.cell(row=gt_row, column=1).fill = total_fill
-    for ci in range(2, gt_col + 1):
-        ws.cell(row=gt_row, column=ci, value=0).fill = total_fill
-        ws.cell(row=gt_row, column=ci).font = Font(bold=True)
-        ws.cell(row=gt_row, column=ci).border = thin_border
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return send_file(
-        output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name='stock_dashboard_template.xlsx'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Email configuration
-# ---------------------------------------------------------------------------
-
-@app.route('/admin/email-config', methods=['GET', 'POST'])
-@admin_required
-def admin_email_config():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-
-    if request.method == 'POST':
-        f = request.form
-        action = f.get('action', 'smtp')
-
-        if action == 'smtp':
-            if 'SMTP' not in cfg:
-                cfg['SMTP'] = {}
-            cfg['SMTP']['SMTP_HOST']     = f.get('smtp_host', 'smtp.gmail.com').strip()
-            cfg['SMTP']['SMTP_PORT']     = f.get('smtp_port', '587').strip()
-            cfg['SMTP']['SMTP_USER']     = f.get('smtp_user', '').strip()
-            cfg['SMTP']['SMTP_PASSWORD'] = f.get('smtp_password', '').strip()
-            cfg['SMTP']['FROM_NAME']     = f.get('from_name', 'Qualesce IT Tracker').strip()
-            with open(CONFIG_PATH, 'w') as fout:
-                cfg.write(fout)
-            flash('SMTP settings saved successfully!', 'success')
-
-        elif action == 'notifications':
-            if 'NOTIFICATIONS' not in cfg:
-                cfg['NOTIFICATIONS'] = {}
-            notif_keys = [
-                'notify_new_request', 'notify_employee_action',
-                'notify_technician_assigned', 'notify_status_employee',
-                'notify_status_admin', 'notify_chat',
-            ]
-            for key in notif_keys:
-                cfg['NOTIFICATIONS'][key] = 'true' if f.get(key) == 'on' else 'false'
-            with open(CONFIG_PATH, 'w') as fout:
-                cfg.write(fout)
-            flash('Notification preferences saved!', 'success')
-
-        return redirect(url_for('admin_email_config'))
-
-    smtp  = dict(cfg['SMTP'])          if 'SMTP'          in cfg else {}
-    notif = dict(cfg['NOTIFICATIONS']) if 'NOTIFICATIONS' in cfg else {}
-    return render_template('admin/email_config.html', smtp=smtp, notif=notif)
-
-
-@app.route('/admin/test-email', methods=['POST'])
-@admin_required
-def admin_test_email():
-    to_email = request.form.get('test_email', '').strip()
-    if not to_email:
-        flash('Please enter a test email address.', 'danger')
-        return redirect(url_for('admin_email_config'))
-    html = f"""
-    <div style="font-family:Segoe UI,sans-serif;max-width:480px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-      <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-        <h2 style="color:#fff;margin:0;font-size:1.2rem">Test Email — IT Asset Tracker</h2>
-      </div>
-      <div style="padding:28px 30px">
-        <p style="color:#374151">Your email configuration is working correctly!</p>
-        <p style="color:#6b7280;font-size:0.9rem">All system notifications (service requests, status updates, chat messages) will be delivered using this email account.</p>
-        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 18px;margin-top:16px;color:#166534;font-size:0.9rem">
-          <strong>✓ SMTP connection successful</strong><br>
-          Sent at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        </div>
-      </div>
-      <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-    </div>"""
-    ok, msg = send_notification_email([to_email], 'IT Asset Tracker — Test Email', html)
-    if ok:
-        flash(f'Test email sent to {to_email} successfully!', 'success')
+    # ── Page title
+    st.markdown('<div class="topbar"><div class="topbar-title"><i class="fas fa-tachometer-alt me-2 text-muted"></i>Admin Dashboard</div></div>', unsafe_allow_html=True)
+
+    # ── Stat cards (exact same HTML as Flask templates)
+    def card(key, label, icon, cls, icls, extra_style="", val_style=""):
+        v = stats.get(key, 0)
+        if key == 'yashwanth' and v == 0: return ""
+        if extra_style:
+            return f'<div class="col-6 col-md-4 col-xl-2"><div class="stat-card" style="{extra_style}"><div class="icon" style="{icls}"><i class="{icon}"></i></div><div class="value" style="{val_style}">{v}</div><div class="label">{label}</div></div></div>'
+        return f'<div class="col-6 col-md-4 col-xl-2"><div class="stat-card {cls}"><div class="icon {icls}"><i class="{icon}"></i></div><div class="value">{v}</div><div class="label">{label}</div></div></div>'
+
+    cards = "".join([
+        card('total',    'Total Assets',   'fas fa-laptop',      'card-primary', 'card-icon-primary'),
+        card('assigned', 'Assigned',       'fas fa-user-check',  'card-success', 'card-icon-success'),
+        card('stock',    'In Stock',       'fas fa-warehouse',   'card-info',    'card-icon-primary'),
+        card('dead',     'Dead/Retired',   'fas fa-times-circle','card-danger',  'card-icon-danger'),
+        card('to_check', 'To Check',       'fas fa-search',      '', '',
+             'background:linear-gradient(135deg,#f0f4ff,#e8effe)',
+             'linear-gradient(135deg,#f59e0b,#fbbf24)', ),
+        card('yashwanth','Yashwanth',      'fas fa-user-shield', '', '',
+             'background:linear-gradient(135deg,#f0fdf4,#dcfce7)',
+             'linear-gradient(135deg,#8b5cf6,#a78bfa)'),
+        card('users',    'Employees',      'fas fa-users',       'card-warning', 'card-icon-warning'),
+        card('services', 'Service Records','fas fa-wrench',      'card-purple',  'card-icon-primary'),
+    ])
+
+    # Fix: custom cards need different format
+    def card2(key, label, icon, extra_bg, icon_bg, val_color):
+        v = stats.get(key,0)
+        if key=='yashwanth' and v==0: return ""
+        return f'<div class="col-6 col-md-4 col-xl-2"><div class="stat-card" style="background:{extra_bg}"><div class="icon" style="background:{icon_bg}"><i class="{icon}"></i></div><div class="value" style="color:{val_color}">{v}</div><div class="label">{label}</div></div></div>'
+
+    st.markdown(f"""
+    <div class="content-area" style="padding:1.5rem 2rem">
+    <div class="row g-3 mb-4">
+      {card('total','Total Assets','fas fa-laptop','card-primary','card-icon-primary')}
+      {card('assigned','Assigned','fas fa-user-check','card-success','card-icon-success')}
+      {card('stock','In Stock','fas fa-warehouse','card-info','card-icon-primary')}
+      {card('dead','Dead/Retired','fas fa-times-circle','card-danger','card-icon-danger')}
+      {card2('to_check','To Check','fas fa-search','linear-gradient(135deg,#f0f4ff,#e8effe)','linear-gradient(135deg,#f59e0b,#fbbf24)','#92400e')}
+      {card2('yashwanth','Yashwanth','fas fa-user-shield','linear-gradient(135deg,#f0fdf4,#dcfce7)','linear-gradient(135deg,#8b5cf6,#a78bfa)','#5b21b6')}
+      {card('users','Employees','fas fa-users','card-warning','card-icon-warning')}
+      {card('services','Service Records','fas fa-wrench','card-purple','card-icon-primary')}
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if pending:
+        st.warning(f"⚠️ {pending} pending service request(s) waiting for review.")
+        if st.button("View Service Requests →"):
+            st.session_state.page='service_requests'; st.rerun()
+
+    # ── Stock dashboard
+    st.markdown('<div style="padding:0 2rem">', unsafe_allow_html=True)
+    col_l, col_r = st.columns([5, 1])
+    with col_l:
+        st.markdown('<div class="panel-title" style="font-size:1rem;font-weight:700;padding:8px 0"><i class="fas fa-boxes me-2"></i>Stock Dashboard</div>', unsafe_allow_html=True)
+    with col_r:
+        if st.button("🔄 Sync"):
+            _sync_stock(); st.rerun()
+
+    if stock_rows:
+        statuses,models,data=[],[],{}
+        for r in stock_rows:
+            if r['status'] not in statuses: statuses.append(r['status'])
+            if r['model'] not in models: models.append(r['model'])
+            data.setdefault(r['status'],{})[r['model']]=r['count']
+        rows=[]
+        for s in statuses:
+            row={'Status':s};row.update({m:data.get(s,{}).get(m,0) for m in models})
+            row['Total']=sum(data.get(s,{}).get(m,0) for m in models);rows.append(row)
+        gt={'Status':'Grand Total'}
+        gt.update({m:sum(data.get(s,{}).get(m,0) for s in statuses) for m in models})
+        gt['Total']=sum(gt[m] for m in models);rows.append(gt)
+        df=pd.DataFrame(rows).set_index('Status')
+        st.dataframe(df, use_container_width=True)
     else:
-        flash(f'Failed to send test email: {msg}', 'danger')
-    return redirect(url_for('admin_email_config'))
+        st.info("No stock data. Click Sync to populate from assets.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-
-# ---------------------------------------------------------------------------
-# API endpoints
-# ---------------------------------------------------------------------------
-
-@app.route('/api/assets/search')
-@admin_required
-def api_search_assets():
-    q = request.args.get('q', '')
-    conn = get_db()
-    assets = conn.execute(
-        "SELECT asset_no, login_id, model, asset_status FROM assets WHERE asset_no LIKE ? OR login_id LIKE ? LIMIT 20",
-        (f'%{q}%', f'%{q}%')).fetchall()
-    conn.close()
-    return jsonify([dict(a) for a in assets])
-
-
-# ---------------------------------------------------------------------------
-# Personal email preferences - User & Technician
-# ---------------------------------------------------------------------------
-
-@app.route('/user/email-preferences', methods=['GET', 'POST'])
-@login_required
-def user_email_preferences():
-    if session.get('role') in ('admin', 'technician'):
-        return redirect(url_for('admin_dashboard'))
-    user_id = session['user_id']
-    conn = get_db()
-    if request.method == 'POST':
-        prefs = {
-            'action': request.form.get('notify_action') == 'on',
-            'status': request.form.get('notify_status') == 'on',
-            'chat':   request.form.get('notify_chat')   == 'on',
-        }
-        conn.execute("UPDATE users SET notification_prefs=? WHERE id=?",
-                     (json.dumps(prefs), user_id))
-        conn.commit()
-        conn.close()
-        flash('Email preferences saved!', 'success')
-        return redirect(url_for('user_email_preferences'))
-    row = conn.execute("SELECT notification_prefs, email FROM users WHERE id=?", (user_id,)).fetchone()
-    conn.close()
-    try:
-        prefs = json.loads(row['notification_prefs']) if row and row['notification_prefs'] else {}
-    except Exception:
-        prefs = {}
-    user_email = row['email'] if row else ''
-    return render_template('user/email_preferences.html', prefs=prefs, user_email=user_email)
-
-
-@app.route('/technician/email-preferences', methods=['GET', 'POST'])
-@technician_required
-def technician_email_preferences():
-    user_id = session['user_id']
-    conn = get_db()
-    if request.method == 'POST':
-        prefs = {
-            'assigned': request.form.get('notify_assigned') == 'on',
-            'chat':     request.form.get('notify_chat')     == 'on',
-            'status':   request.form.get('notify_status')   == 'on',
-        }
-        conn.execute("UPDATE users SET notification_prefs=? WHERE id=?",
-                     (json.dumps(prefs), user_id))
-        conn.commit()
-        conn.close()
-        flash('Email preferences saved!', 'success')
-        return redirect(url_for('technician_email_preferences'))
-    row = conn.execute("SELECT notification_prefs, email FROM users WHERE id=?", (user_id,)).fetchone()
-    conn.close()
-    try:
-        prefs = json.loads(row['notification_prefs']) if row and row['notification_prefs'] else {}
-    except Exception:
-        prefs = {}
-    user_email = row['email'] if row else ''
-    return render_template('technician/email_preferences.html', prefs=prefs, user_email=user_email)
-
-
-# ---------------------------------------------------------------------------
-# Service Requests - User routes
-# ---------------------------------------------------------------------------
-
-@app.route('/user/my-requests')
-@login_required
-def user_my_requests():
-    if session.get('role') in ('admin', 'technician'):
-        return redirect(url_for('admin_dashboard'))
-    conn = get_db()
-    reqs = conn.execute(
-        "SELECT * FROM service_requests WHERE employee_id=? ORDER BY created_at DESC",
-        (session['user_id'],)).fetchall()
-    conn.close()
-    return render_template('user/my_requests.html', requests=reqs)
-
-
-@app.route('/user/request/<int:req_id>', methods=['GET', 'POST'])
-@login_required
-def user_request_detail(req_id):
-    if session.get('role') in ('admin', 'technician'):
-        return redirect(url_for('admin_dashboard'))
-    conn = get_db()
-    req = conn.execute(
-        "SELECT * FROM service_requests WHERE id=? AND employee_id=?",
-        (req_id, session['user_id'])).fetchone()
-    if not req:
-        conn.close()
-        flash('Request not found.', 'danger')
-        return redirect(url_for('user_my_requests'))
-    if request.method == 'POST':
-        message = request.form.get('message', '').strip()
-        if message:
-            conn.execute(
-                "INSERT INTO chat_messages (request_id, sender_id, sender_name, sender_role, message) VALUES (?,?,?,?,?)",
-                (req_id, session['user_id'], session['employee_name'], 'user', message))
-            conn.commit()
-            admins = conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
-            admin_emails = [a['email'] for a in admins if a['email']]
-            if admin_emails and get_notification_prefs()['chat']:
-                send_notification_email(admin_emails, f'New message on Request #{req_id}',
-                    build_chat_email_html(session['employee_name'], 'user', message, req_id, req['service_type']))
-            if req['assigned_to_id']:
-                tech = conn.execute("SELECT email FROM users WHERE id=?", (req['assigned_to_id'],)).fetchone()
-                if _should_notify_tech(req['assigned_to_id'], tech['email'] if tech else '', 'chat', 'chat'):
-                    send_notification_email([tech['email']], f'New message on Request #{req_id}',
-                        build_chat_email_html(session['employee_name'], 'user', message, req_id, req['service_type']))
-        conn.close()
-        return redirect(url_for('user_request_detail', req_id=req_id))
-    messages = conn.execute(
-        "SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at ASC",
-        (req_id,)).fetchall()
-    conn.close()
-    return render_template('user/request_detail.html', req=req, messages=messages)
-
-
-# ---------------------------------------------------------------------------
-# Service Requests - Admin routes
-# ---------------------------------------------------------------------------
-
-@app.route('/admin/service-requests')
-@admin_required
-def admin_service_requests():
-    status_f = request.args.get('status', '')
-    conn = get_db()
-    q = "SELECT * FROM service_requests WHERE 1=1"
-    p = []
-    if status_f:
-        q += " AND status=?"
-        p.append(status_f)
-    q += " ORDER BY created_at DESC"
-    reqs = conn.execute(q, p).fetchall()
-    pending_count = conn.execute("SELECT COUNT(*) FROM service_requests WHERE status='Pending'").fetchone()[0]
-    conn.close()
-    return render_template('admin/service_requests.html', requests=reqs, status_filter=status_f, pending_count=pending_count)
-
-
-@app.route('/admin/service-request/<int:req_id>')
-@admin_required
-def admin_service_request_detail(req_id):
-    conn = get_db()
-    req = conn.execute("SELECT * FROM service_requests WHERE id=?", (req_id,)).fetchone()
-    if not req:
-        conn.close()
-        flash('Request not found.', 'danger')
-        return redirect(url_for('admin_service_requests'))
-    messages = conn.execute(
-        "SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at ASC",
-        (req_id,)).fetchall()
-    technicians = conn.execute(
-        "SELECT id, employee_name, username FROM users WHERE role='technician' ORDER BY employee_name").fetchall()
-    conn.close()
-    return render_template('admin/service_request_detail.html', req=req, messages=messages, technicians=technicians)
-
-
-@app.route('/admin/service-request/<int:req_id>/action', methods=['POST'])
-@admin_required
-def admin_service_request_action(req_id):
-    action = request.form.get('action')
-    new_status = 'Accepted' if action == 'accept' else 'Declined'
-    conn = get_db()
-    req = conn.execute("SELECT * FROM service_requests WHERE id=?", (req_id,)).fetchone()
-    if not req:
-        conn.close()
-        flash('Request not found.', 'danger')
-        return redirect(url_for('admin_service_requests'))
-    conn.execute("UPDATE service_requests SET status=?, updated_at=? WHERE id=?",
-                 (new_status, datetime.now().isoformat(), req_id))
-    conn.commit()
-    emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
-    conn.close()
-    if _should_notify_employee(req['employee_id'], emp['email'] if emp else '', 'employee_action', 'action'):
-        color = '#22c55e' if action == 'accept' else '#ef4444'
-        html = f"""
-        <div style="font-family:Segoe UI,sans-serif;max-width:560px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-          <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-            <h2 style="color:#fff;margin:0;font-size:1.2rem">Service Request #{req_id} — {new_status}</h2>
+    # ── Recent assets
+    st.markdown('<div style="padding:1rem 2rem 0">', unsafe_allow_html=True)
+    if recent:
+        rows_html="".join(f"""
+        <tr>
+          <td><span class="fw-semibold">{a['asset_no']}</span></td>
+          <td>{a['login_id'] or '—'}</td>
+          <td>{a['model'] or '—'}</td>
+          <td>{sbadge(a['asset_status']) if a['asset_status'] else '—'}</td>
+          <td><span class="badge {'bg-danger-subtle text-danger' if a['warranty_status']=='Out of warranty' else 'bg-success-subtle text-success' if a['warranty_status'] else 'bg-secondary'}">{a['warranty_status'] or '—'}</span></td>
+        </tr>""" for a in recent)
+        st.markdown(f"""
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-clock"></i> Recently Updated Assets</div></div>
+          <div class="panel-body p-0">
+            <div class="table-responsive">
+              <table class="table table-modern mb-0">
+                <thead><tr><th>Asset No</th><th>Employee</th><th>Model</th><th>Status</th><th>Warranty</th></tr></thead>
+                <tbody>{rows_html}</tbody>
+              </table>
+            </div>
           </div>
-          <div style="padding:28px 30px">
-            <p style="color:#374151">Hi <strong>{req['employee_name']}</strong>,</p>
-            <p style="color:#374151">Your service request has been <strong style="color:{color}">{new_status}</strong>.</p>
-            <table style="width:100%;border-collapse:collapse;margin:16px 0">
-              <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;width:40%;font-weight:600">Request #</td><td style="padding:8px 12px;color:#1e293b">#{req_id}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Asset</td><td style="padding:8px 12px;color:#1e293b">{req['asset_no']}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;font-weight:600">Issue Type</td><td style="padding:8px 12px;color:#1e293b">{req['service_type']}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Status</td><td style="padding:8px 12px;font-weight:700;color:{color}">{new_status}</td></tr>
+        </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def _sync_stock():
+    from collections import defaultdict
+    conn=get_db();agg=defaultdict(int)
+    for r in conn.execute("SELECT asset_status,model,COUNT(*) FROM assets WHERE asset_status!='' AND model!='' GROUP BY asset_status,model").fetchall():
+        s=r[0].strip();s='IT Stock' if s=='ITStock' else s;m=r[1].strip()
+        if m: agg[(s,m)]+=r[2]
+    conn.execute("DELETE FROM stock_dashboard")
+    for (s,m),cnt in agg.items(): conn.execute("INSERT INTO stock_dashboard(status,model,count) VALUES(?,?,?)",(s,m,cnt))
+    conn.commit();conn.close()
+
+# ─── Admin Service Requests ────────────────────────────────────────────────────
+
+def pg_admin_service_requests():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-inbox me-2 text-muted"></i>Service Requests</h4>', unsafe_allow_html=True)
+    sf = st.selectbox("", ['All','Pending','Accepted','In Progress','Hold','Completed','Declined'], label_visibility="collapsed")
+    conn=get_db()
+    q="SELECT * FROM service_requests WHERE 1=1"+(" AND status=?" if sf!='All' else "")+" ORDER BY created_at DESC"
+    reqs=conn.execute(q,[sf] if sf!='All' else []).fetchall();conn.close()
+
+    if not reqs:
+        st.markdown('<div class="panel"><div class="panel-body text-center text-muted py-5"><i class="fas fa-inbox fa-3x mb-3 opacity-50"></i><p>No requests found.</p></div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True); return
+
+    rows_html=""
+    for r in reqs:
+        rows_html+=f"""
+        <tr>
+          <td class="fw-bold text-muted small">#{r['id']}</td>
+          <td class="fw-semibold">{r['employee_name']}</td>
+          <td>{r['asset_no'] or '—'}</td>
+          <td class="small fw-semibold">{r['service_type']}</td>
+          <td>{sbadge(r['status'])}</td>
+          <td class="small text-muted">{r['assigned_to_name'] or '—'}</td>
+          <td class="small text-muted">{r['created_at'][:10]}</td>
+          <td><form method="get"><button class="btn btn-sm btn-outline-primary" name="manage" value="{r['id']}">Manage</button></form></td>
+        </tr>"""
+
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-inbox"></i> Requests ({len(reqs)})</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>#</th><th>Employee</th><th>Asset</th><th>Issue</th><th>Status</th><th>Assigned</th><th>Date</th><th></th></tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+
+    # Use Streamlit buttons for interactivity
+    st.markdown("---")
+    st.caption("Click a request ID to manage it:")
+    cols = st.columns(min(len(reqs), 6))
+    for i, r in enumerate(reqs[:12]):
+        with cols[i % 6]:
+            if st.button(f"#{r['id']} {r['employee_name'][:10]}", key=f"req_{r['id']}"):
+                st.session_state.req_id=r['id']; st.session_state.page='req_detail'; st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_admin_req_detail():
+    req_id=st.session_state.get('req_id')
+    if not req_id: st.session_state.page='service_requests';st.rerun();return
+    conn=get_db()
+    req=conn.execute("SELECT * FROM service_requests WHERE id=?",(req_id,)).fetchone()
+    if not req: conn.close();st.error("Not found.");return
+    msgs=conn.execute("SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at",(req_id,)).fetchall()
+    techs=conn.execute("SELECT id,employee_name,username FROM users WHERE role='technician'").fetchall()
+    conn.close()
+
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    if st.button("← Back to Requests"): st.session_state.page='service_requests';st.rerun()
+
+    st.markdown(f'<h4><i class="fas fa-inbox me-2 text-muted"></i>Request #{req_id}</h4>', unsafe_allow_html=True)
+
+    left,right=st.columns([1,1.6])
+    with left:
+        st.markdown(f"""
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-info-circle"></i> Details</div></div>
+          <div class="panel-body">
+            <div class="text-center mb-3">{sbadge(req['status'])}</div>
+            <table class="table table-sm small mb-0">
+              <tr><td class="text-muted fw-semibold">Employee</td><td>{req['employee_name']}</td></tr>
+              <tr><td class="text-muted fw-semibold">Asset</td><td>{req['asset_no'] or '—'}</td></tr>
+              <tr><td class="text-muted fw-semibold">Issue Type</td><td>{req['service_type']}</td></tr>
+              <tr><td class="text-muted fw-semibold">Submitted</td><td>{req['created_at'][:10]}</td></tr>
+              <tr><td class="text-muted fw-semibold">Assigned To</td><td>{req['assigned_to_name'] or '—'}</td></tr>
             </table>
+            <div class="mt-3 small bg-light rounded p-2">{req['description']}</div>
           </div>
-          <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-        </div>"""
-        send_notification_email([emp['email']], f'Your Service Request #{req_id} has been {new_status}', html)
-    flash(f'Request {new_status.lower()}!', 'success')
-    return redirect(url_for('admin_service_request_detail', req_id=req_id))
+        </div>""", unsafe_allow_html=True)
 
+        if req['status']=='Pending':
+            st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title"><i class="fas fa-check-circle"></i> Review</div></div><div class="panel-body">', unsafe_allow_html=True)
+            ca,cd=st.columns(2)
+            if ca.button("✅ Accept",use_container_width=True,type="primary"): _set_status(req_id,req,'Accepted');st.rerun()
+            if cd.button("❌ Decline",use_container_width=True): _set_status(req_id,req,'Declined');st.rerun()
+            st.markdown('</div></div>', unsafe_allow_html=True)
 
-@app.route('/admin/service-request/<int:req_id>/status', methods=['POST'])
-@admin_required
-def admin_service_request_status(req_id):
-    new_status = request.form.get('status')
-    if new_status not in ('Pending', 'Accepted', 'In Progress', 'Hold', 'Completed', 'Declined'):
-        flash('Invalid status.', 'danger')
-        return redirect(url_for('admin_service_request_detail', req_id=req_id))
-    conn = get_db()
-    req = conn.execute("SELECT * FROM service_requests WHERE id=?", (req_id,)).fetchone()
-    conn.execute("UPDATE service_requests SET status=?, updated_at=? WHERE id=?",
-                 (new_status, datetime.now().isoformat(), req_id))
+        st.markdown('<div class="panel mt-3"><div class="panel-header"><div class="panel-title"><i class="fas fa-exchange-alt"></i> Change Status</div></div><div class="panel-body">', unsafe_allow_html=True)
+        with st.form("sf"):
+            opts=['Pending','Accepted','In Progress','Hold','Completed','Declined']
+            ns=st.selectbox("",opts,index=opts.index(req['status']),label_visibility="collapsed")
+            if st.form_submit_button("Update Status",use_container_width=True): _set_status(req_id,req,ns);st.rerun()
+        st.markdown('</div></div>', unsafe_allow_html=True)
+
+        if techs:
+            st.markdown('<div class="panel mt-3"><div class="panel-header"><div class="panel-title"><i class="fas fa-user-hard-hat"></i> Assign Technician</div></div><div class="panel-body">', unsafe_allow_html=True)
+            with st.form("tf"):
+                to={t['id']:t['employee_name'] or t['username'] for t in techs}
+                tid=st.selectbox("",list(to.keys()),format_func=lambda x:to[x],label_visibility="collapsed")
+                if st.form_submit_button("Assign",use_container_width=True): _assign(req_id,req,tid,to[tid]);st.rerun()
+            st.markdown('</div></div>', unsafe_allow_html=True)
+
+    with right:
+        msgs_html=""
+        for m in msgs:
+            is_admin=m['sender_role']=='admin'
+            bg='#533483' if m['sender_role']=='admin' else '#0891b2' if m['sender_role']=='technician' else '#e2e8f0'
+            tc='#fff' if m['sender_role'] in ('admin','technician') else '#1e293b'
+            side='justify-content-end' if is_admin else ''
+            r_badge=f'<span class="badge {"bg-warning text-dark" if m["sender_role"]=="admin" else "bg-info" if m["sender_role"]=="technician" else "bg-secondary"} ms-1" style="font-size:.65rem">{m["sender_role"].upper()}</span>'
+            msgs_html+=f"""
+            <div class="d-flex mb-3 {side}">
+              <div style="max-width:75%">
+                <div class="small text-muted mb-1 {'text-end' if is_admin else ''}">
+                  {'You (Admin)' if is_admin else f'<strong>{m["sender_name"]}</strong>'} {r_badge} · {m['created_at'][11:16]}
+                </div>
+                <div style="padding:10px 14px;word-break:break-word;background:{bg};color:{tc};
+                  border-radius:{'12px 12px 0 12px' if is_admin else '12px 12px 12px 0'}">
+                  {m['message']}
+                </div>
+              </div>
+            </div>"""
+
+        st.markdown(f"""
+        <div class="panel" style="min-height:500px;display:flex;flex-direction:column">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-comments"></i> Chat</div></div>
+          <div style="flex:1;overflow-y:auto;padding:20px;background:#f8fafc;min-height:350px">
+            {msgs_html if msgs_html else '<div class="text-center text-muted py-4"><i class="fas fa-comments fa-2x mb-2 opacity-50"></i><p class="small">No messages yet.</p></div>'}
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        with st.form("cf",clear_on_submit=True):
+            mi=st.text_area("",placeholder="Type your message...",height=80,label_visibility="collapsed")
+            if st.form_submit_button("Send Message 📨",use_container_width=True):
+                if mi.strip(): _chat(req_id,req,mi.strip(),'admin');st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def _set_status(req_id,req,status):
+    conn=get_db()
+    conn.execute("UPDATE service_requests SET status=?,updated_at=? WHERE id=?",(status,datetime.now().isoformat(),req_id))
     conn.commit()
-    emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
+    emp=conn.execute("SELECT email FROM users WHERE id=?",(req['employee_id'],)).fetchone()
     conn.close()
-    if _should_notify_employee(req['employee_id'], emp['email'] if emp else '', 'status_employee', 'status'):
-        send_notification_email([emp['email']], f'Service Request #{req_id} Status: {new_status}',
-            build_status_email_html(req['employee_name'], new_status, req_id, req['service_type'], req['asset_no']))
-    flash(f'Status updated to {new_status}!', 'success')
-    return redirect(url_for('admin_service_request_detail', req_id=req_id))
+    if emp and emp['email'] and get_nc()['notify_status_employee']:
+        send_email([emp['email']],f"Request #{req_id}: {status}",status_email_html(req['employee_name'],status,req_id,req['service_type'],req['asset_no']))
+    st.success(f"Status updated to {status}!")
 
-
-@app.route('/admin/service-request/<int:req_id>/assign', methods=['POST'])
-@admin_required
-def admin_service_request_assign(req_id):
-    tech_id = request.form.get('technician_id')
-    conn = get_db()
-    tech = conn.execute(
-        "SELECT id, employee_name, username, email FROM users WHERE id=? AND role='technician'",
-        (tech_id,)).fetchone()
-    if not tech:
-        conn.close()
-        flash('Technician not found.', 'danger')
-        return redirect(url_for('admin_service_request_detail', req_id=req_id))
-    req = conn.execute("SELECT * FROM service_requests WHERE id=?", (req_id,)).fetchone()
-    tech_name = tech['employee_name'] or tech['username']
-    conn.execute(
-        "UPDATE service_requests SET assigned_to_id=?, assigned_to_name=?, status='In Progress', updated_at=? WHERE id=?",
-        (tech['id'], tech_name, datetime.now().isoformat(), req_id))
+def _assign(req_id,req,tech_id,tech_name):
+    conn=get_db()
+    conn.execute("UPDATE service_requests SET assigned_to_id=?,assigned_to_name=?,status='In Progress',updated_at=? WHERE id=?",(tech_id,tech_name,datetime.now().isoformat(),req_id))
     conn.commit()
-    prefs = get_notification_prefs()
-    if _should_notify_tech(tech['id'], tech['email'], 'technician_assigned', 'assigned'):
-        html = f"""
-        <div style="font-family:Segoe UI,sans-serif;max-width:560px;margin:auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
-          <div style="background:linear-gradient(135deg,#0f3460,#533483);padding:24px 30px;text-align:center">
-            <h2 style="color:#fff;margin:0;font-size:1.2rem">New Task Assigned — Request #{req_id}</h2>
-          </div>
-          <div style="padding:28px 30px">
-            <p style="color:#374151">Hi <strong>{tech_name}</strong>, a service request has been assigned to you.</p>
-            <table style="width:100%;border-collapse:collapse;margin:16px 0">
-              <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;width:40%;font-weight:600">Employee</td><td style="padding:8px 12px;color:#1e293b">{req['employee_name']}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Asset</td><td style="padding:8px 12px;color:#1e293b">{req['asset_no']}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f8fafc;color:#6b7280;font-weight:600">Issue</td><td style="padding:8px 12px;color:#1e293b">{req['service_type']}</td></tr>
-              <tr><td style="padding:8px 12px;background:#f1f5f9;color:#6b7280;font-weight:600">Description</td><td style="padding:8px 12px;color:#1e293b">{req['description']}</td></tr>
+    tech=conn.execute("SELECT email FROM users WHERE id=?",(tech_id,)).fetchone()
+    emp=conn.execute("SELECT email FROM users WHERE id=?",(req['employee_id'],)).fetchone()
+    conn.close()
+    nc=get_nc()
+    if tech and tech['email'] and nc['notify_technician_assigned']:
+        send_email([tech['email']],f"Request #{req_id} Assigned to You",f"<p>Request #{req_id} ({req['service_type']}) has been assigned to you.</p>")
+    if emp and emp['email'] and nc['notify_status_employee']:
+        send_email([emp['email']],f"Your Request #{req_id} is In Progress",status_email_html(req['employee_name'],'In Progress',req_id,req['service_type'],req['asset_no']))
+    st.success(f"Assigned to {tech_name}!")
+
+def _chat(req_id,req,message,sender_role):
+    conn=get_db()
+    conn.execute("INSERT INTO chat_messages(request_id,sender_id,sender_name,sender_role,message) VALUES(?,?,?,?,?)",
+        (req_id,st.session_state.user_id,st.session_state.employee_name,sender_role,message))
+    conn.commit()
+    nc=get_nc()
+    if nc['notify_chat']:
+        if sender_role=='admin':
+            emp=conn.execute("SELECT email FROM users WHERE id=?",(req['employee_id'],)).fetchone()
+            if emp and emp['email']: send_email([emp['email']],f"Admin replied on Request #{req_id}",chat_email_html(st.session_state.employee_name,'admin',message,req_id,req['service_type']))
+        elif sender_role=='user':
+            admins=conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
+            send_email([a['email'] for a in admins if a['email']],f"Message on Request #{req_id}",chat_email_html(st.session_state.employee_name,'user',message,req_id,req['service_type']))
+        elif sender_role=='technician':
+            emp=conn.execute("SELECT email FROM users WHERE id=?",(req['employee_id'],)).fetchone()
+            admins=conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
+            recip=([emp['email']] if emp and emp['email'] else [])+[a['email'] for a in admins if a['email']]
+            if recip: send_email(recip,f"Tech message on Request #{req_id}",chat_email_html(st.session_state.employee_name,'technician',message,req_id,req['service_type']))
+    conn.close()
+
+# ─── Admin Assets / Employees / Services / Users ───────────────────────────────
+
+def pg_admin_assets():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-laptop me-2 text-muted"></i>All Assets</h4>', unsafe_allow_html=True)
+    c1,c2=st.columns([3,1])
+    search=c1.text_input("","",placeholder="🔍 Search employee, model, asset no...",label_visibility="collapsed")
+    sf=c2.selectbox("",['All','Assigned','IT Stock','DEAD','To Check','Service','Yashwanth'],label_visibility="collapsed")
+    conn=get_db()
+    q="SELECT * FROM assets WHERE 1=1";p=[]
+    if search: q+=" AND (login_id LIKE ? OR asset_no LIKE ? OR model LIKE ? OR serial_no LIKE ?)";p+=[f'%{search}%']*4
+    if sf!='All': q+=" AND asset_status=?";p.append(sf)
+    assets=conn.execute(q+" ORDER BY asset_no",p).fetchall();conn.close()
+    if assets:
+        rows="".join(f"""
+        <tr><td><span class="fw-semibold">{a['asset_no']}</span></td>
+        <td>{a['login_id'] or '—'}</td><td>{a['model'] or '—'}</td>
+        <td>{sbadge(a['asset_status']) if a['asset_status'] else '—'}</td>
+        <td>{a['serial_no'] or '—'}</td>
+        <td><span class="badge {'bg-danger-subtle text-danger' if a['warranty_status']=='Out of warranty' else 'bg-success-subtle text-success' if a['warranty_status'] else 'bg-secondary'}">{a['warranty_status'] or '—'}</span></td>
+        </tr>""" for a in assets)
+        st.markdown(f"""
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-laptop"></i> All Assets ({len(assets)})</div></div>
+          <div class="panel-body p-0"><div class="table-responsive">
+            <table class="table table-modern mb-0">
+              <thead><tr><th>Asset No</th><th>Employee</th><th>Model</th><th>Status</th><th>Serial No</th><th>Warranty</th></tr></thead>
+              <tbody>{rows}</tbody>
             </table>
-            <p style="color:#6b7280;font-size:0.9rem">Log in to your Technician Portal to view and respond.</p>
+          </div></div>
+        </div>""", unsafe_allow_html=True)
+    else: st.info("No assets found.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_admin_employees():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-users me-2 text-muted"></i>Employees</h4>', unsafe_allow_html=True)
+    conn=get_db()
+    emps=conn.execute("SELECT login_id,COUNT(*) as cnt,GROUP_CONCAT(model,', ') as models FROM assets WHERE login_id NOT IN ('IT Stock','DEAD','') AND login_id IS NOT NULL GROUP BY login_id ORDER BY login_id").fetchall()
+    conn.close()
+    search=st.text_input("","",placeholder="🔍 Search employee...",label_visibility="collapsed")
+    rows="".join(f"""<tr><td class="fw-semibold">{e['login_id']}</td><td>{e['cnt']}</td><td class="small text-muted">{e['models'] or '—'}</td></tr>"""
+                 for e in emps if not search or search.lower() in e['login_id'].lower())
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-users"></i> Employees</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>Employee</th><th>Assets</th><th>Models</th></tr></thead>
+          <tbody>{rows or '<tr><td colspan="3" class="text-center text-muted py-4">No employees found.</td></tr>'}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_admin_services():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-tools me-2 text-muted"></i>Service History</h4>', unsafe_allow_html=True)
+    search=st.text_input("","",placeholder="🔍 Search...",label_visibility="collapsed")
+    conn=get_db()
+    q="SELECT sh.*,a.login_id FROM service_history sh LEFT JOIN assets a ON sh.asset_no=a.asset_no WHERE 1=1";p=[]
+    if search: q+=" AND (sh.asset_no LIKE ? OR sh.description LIKE ?)";p+=[f'%{search}%']*2
+    svcs=conn.execute(q+" ORDER BY sh.service_date DESC",p).fetchall();conn.close()
+    rows="".join(f"""<tr><td>{s['service_date'] or '—'}</td><td class="fw-semibold">{s['asset_no']}</td>
+    <td>{s['login_id'] or '—'}</td><td>{s['service_type'] or '—'}</td>
+    <td><span class="badge {'bg-success' if s['status']=='Completed' else 'bg-warning text-dark' if s['status']=='Pending' else 'bg-secondary'}">{s['status']}</span></td>
+    <td>{s['technician'] or '—'}</td></tr>""" for s in svcs)
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-tools"></i> Service Records ({len(svcs)})</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>Date</th><th>Asset</th><th>Employee</th><th>Type</th><th>Status</th><th>Technician</th></tr></thead>
+          <tbody>{rows or '<tr><td colspan="6" class="text-center py-4 text-muted">No records.</td></tr>'}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_admin_users():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-user-cog me-2 text-muted"></i>Manage Users</h4>', unsafe_allow_html=True)
+    conn=get_db();users=conn.execute("SELECT * FROM users ORDER BY role,username").fetchall();conn.close()
+    rows="".join(f"""<tr><td>{u['id']}</td><td class="fw-semibold">{u['username']}</td>
+    <td>{u['employee_name'] or '—'}</td>
+    <td><span class="badge {'bg-warning text-dark' if u['role']=='admin' else 'bg-success' if u['role']=='technician' else 'bg-info'}">{u['role'].upper()}</span></td>
+    <td>{u['email'] or '—'}</td><td>{u['department'] or '—'}</td></tr>""" for u in users)
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-users"></i> All Users ({len(users)})</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>ID</th><th>Username</th><th>Name</th><th>Role</th><th>Email</th><th>Dept</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown('<div class="panel mt-3"><div class="panel-header"><div class="panel-title"><i class="fas fa-user-plus"></i> Add New User</div></div><div class="panel-body">', unsafe_allow_html=True)
+    with st.form("auf"):
+        c1,c2=st.columns(2);un=c1.text_input("Username *");pw=c2.text_input("Password *",value="pass123")
+        c3,c4=st.columns(2);en=c3.text_input("Employee Name");rl=c4.selectbox("Role",['user','technician','admin'])
+        c5,c6=st.columns(2);em=c5.text_input("Email");dp=c6.text_input("Department")
+        if st.form_submit_button("Create User",use_container_width=True):
+            if un and pw:
+                try:
+                    conn2=get_db();conn2.execute("INSERT INTO users(username,password,role,employee_name,email,department) VALUES(?,?,?,?,?,?)",(un,pw,rl,en,em,dp));conn2.commit();conn2.close()
+                    st.success(f"User '{un}' created!");st.rerun()
+                except Exception as e: st.error(str(e))
+            else: st.warning("Username and password required.")
+    st.markdown('</div></div></div>', unsafe_allow_html=True)
+
+# ─── Admin Email Config ────────────────────────────────────────────────────────
+
+def pg_email_config():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-envelope-cog me-2 text-muted"></i>Email Configuration</h4>', unsafe_allow_html=True)
+    cfg=configparser.ConfigParser();cfg.read(CONFIG_PATH)
+    smtp=dict(cfg['SMTP']) if 'SMTP' in cfg else {}
+    notif=dict(cfg['NOTIFICATIONS']) if 'NOTIFICATIONS' in cfg else {}
+    t1,t2,t3=st.tabs(["⚙️ SMTP Settings","🔔 Notifications","📨 Test Email"])
+    with t1:
+        if smtp.get('smtp_user'): st.success(f"✅ Configured: {smtp.get('smtp_user')}")
+        else: st.warning("⚠️ Email not configured yet.")
+        with st.form("smf"):
+            c1,c2=st.columns([3,1])
+            h=c1.text_input("SMTP Host",value=smtp.get('smtp_host','smtp.gmail.com'))
+            p=int(c2.text_input("Port",value=smtp.get('smtp_port','587')))
+            u=st.text_input("Sender Email",value=smtp.get('smtp_user',''))
+            pw=st.text_input("App Password",value=smtp.get('smtp_password',''),type="password")
+            fn=st.text_input("Display Name",value=smtp.get('from_name','Qualesce IT Tracker'))
+            if st.form_submit_button("Save SMTP Settings",use_container_width=True):
+                if 'SMTP' not in cfg: cfg['SMTP']={}
+                cfg['SMTP'].update({'SMTP_HOST':h,'SMTP_PORT':str(p),'SMTP_USER':u,'SMTP_PASSWORD':pw,'FROM_NAME':fn})
+                with open(CONFIG_PATH,'w') as f: cfg.write(f)
+                st.success("Saved!"); st.rerun()
+    with t2:
+        def nb(k): return notif.get(k,'true')!='false'
+        with st.form("nf"):
+            n1=st.checkbox("New request → notify admin",value=nb('notify_new_request'))
+            n2=st.checkbox("Accept/Decline → notify employee",value=nb('notify_employee_action'))
+            n3=st.checkbox("Technician assigned → notify tech + employee",value=nb('notify_technician_assigned'))
+            n4=st.checkbox("Status change → notify employee",value=nb('notify_status_employee'))
+            n5=st.checkbox("Tech status change → notify admin",value=nb('notify_status_admin'))
+            n6=st.checkbox("Chat messages → notify all parties",value=nb('notify_chat'))
+            if st.form_submit_button("Save Preferences",use_container_width=True):
+                if 'NOTIFICATIONS' not in cfg: cfg['NOTIFICATIONS']={}
+                for k,v in zip(['notify_new_request','notify_employee_action','notify_technician_assigned','notify_status_employee','notify_status_admin','notify_chat'],[n1,n2,n3,n4,n5,n6]):
+                    cfg['NOTIFICATIONS'][k]='true' if v else 'false'
+                with open(CONFIG_PATH,'w') as f: cfg.write(f)
+                st.success("Saved!")
+    with t3:
+        with st.form("tf"):
+            to=st.text_input("Send test to",value=smtp.get('smtp_user',''))
+            if st.form_submit_button("Send Test Email",use_container_width=True):
+                ok,msg=send_email([to],"IT Tracker — Test","<p>✅ SMTP is working correctly!</p>")
+                st.success("Test email sent!") if ok else st.error(f"Failed: {msg}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ─── User pages ────────────────────────────────────────────────────────────────
+
+def pg_user_dashboard():
+    name=st.session_state.employee_name
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown(f'<div class="panel mb-4" style="background:linear-gradient(135deg,#0f3460,#533483);color:#fff;padding:24px 28px;border-radius:16px"><h4 style="margin:0;color:#fff"><i class="fas fa-hand-wave me-2"></i>Welcome back, {name}!</h4><p style="margin:6px 0 0;opacity:.8">Here\'s your IT asset overview</p></div>', unsafe_allow_html=True)
+    conn=get_db()
+    assets=conn.execute("SELECT * FROM assets WHERE login_id LIKE ? ORDER BY asset_no",(f'%{name}%',)).fetchall()
+    reqs=conn.execute("SELECT * FROM service_requests WHERE employee_id=? ORDER BY created_at DESC LIMIT 5",(st.session_state.user_id,)).fetchall()
+    conn.close()
+    c1,c2=st.columns(2)
+    c1.metric("My Assets",len(assets)); c2.metric("My Requests",len(reqs))
+    if assets:
+        rows="".join(f"""<tr><td class="fw-semibold">{a['asset_no']}</td>
+        <td>{a['model'] or '—'}</td><td>{sbadge(a['asset_status']) if a['asset_status'] else '—'}</td>
+        <td>{a['serial_no'] or '—'}</td></tr>""" for a in assets)
+        st.markdown(f"""
+        <div class="panel mt-3">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-laptop"></i> My Assets</div></div>
+          <div class="panel-body p-0"><div class="table-responsive">
+            <table class="table table-modern mb-0">
+              <thead><tr><th>Asset No</th><th>Model</th><th>Status</th><th>Serial</th></tr></thead>
+              <tbody>{rows}</tbody>
+            </table>
+          </div></div>
+        </div>""", unsafe_allow_html=True)
+    else: st.info("No assets assigned to you. Contact IT Admin.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_user_my_requests():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    st.markdown('<h4><i class="fas fa-ticket-alt me-2 text-muted"></i>My Service Requests</h4>', unsafe_allow_html=True)
+    if st.button("+ New Request"):
+        st.session_state.page='request_service'; st.rerun()
+    conn=get_db()
+    reqs=conn.execute("SELECT * FROM service_requests WHERE employee_id=? ORDER BY created_at DESC",(st.session_state.user_id,)).fetchall()
+    conn.close()
+    if not reqs:
+        st.markdown('<div class="panel"><div class="panel-body text-center text-muted py-5"><i class="fas fa-inbox fa-3x mb-3 opacity-50"></i><p>No requests yet.</p></div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True); return
+    rows="".join(f"""<tr>
+      <td class="fw-bold text-muted">#{r['id']}</td>
+      <td class="fw-semibold">{r['service_type']}</td>
+      <td>{r['asset_no'] or '—'}</td>
+      <td>{sbadge(r['status'])}</td>
+      <td class="small text-muted">{r['assigned_to_name'] or '—'}</td>
+      <td class="small text-muted">{r['created_at'][:10]}</td>
+    </tr>""" for r in reqs)
+    st.markdown(f"""
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-list"></i> My Requests ({len(reqs)})</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>#</th><th>Issue</th><th>Asset</th><th>Status</th><th>Assigned</th><th>Date</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown("---"); st.caption("Click a request to view and chat:")
+    cols=st.columns(min(len(reqs),4))
+    for i,r in enumerate(reqs[:8]):
+        with cols[i%4]:
+            if st.button(f"#{r['id']} {sbadge(r['status'])}",key=f"ur_{r['id']}",use_container_width=True):
+                st.session_state.req_id=r['id']; st.session_state.page='req_detail_user'; st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_user_req_detail():
+    req_id=st.session_state.get('req_id')
+    if not req_id: st.session_state.page='my_requests';st.rerun();return
+    conn=get_db()
+    req=conn.execute("SELECT * FROM service_requests WHERE id=? AND employee_id=?",(req_id,st.session_state.user_id)).fetchone()
+    if not req: conn.close();st.error("Not found.");return
+    msgs=conn.execute("SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at",(req_id,)).fetchall()
+    conn.close()
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    if st.button("← My Requests"): st.session_state.page='my_requests';st.rerun()
+    st.markdown(f'<h4><i class="fas fa-ticket-alt me-2 text-muted"></i>Request #{req_id}</h4>', unsafe_allow_html=True)
+    left,right=st.columns([1,1.6])
+    with left:
+        st.markdown(f"""
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-info-circle"></i> Details</div></div>
+          <div class="panel-body">
+            <div class="text-center mb-3 fs-5">{sbadge(req['status'])}</div>
+            <table class="table table-sm small">
+              <tr><td class="text-muted fw-semibold">Asset</td><td>{req['asset_no'] or '—'}</td></tr>
+              <tr><td class="text-muted fw-semibold">Issue</td><td>{req['service_type']}</td></tr>
+              <tr><td class="text-muted fw-semibold">Submitted</td><td>{req['created_at'][:10]}</td></tr>
+              <tr><td class="text-muted fw-semibold">Assigned To</td><td>{req['assigned_to_name'] or 'Not assigned yet'}</td></tr>
+            </table>
+            <div class="small bg-light rounded p-2 mt-2">{req['description']}</div>
           </div>
-          <div style="background:#f8fafc;padding:12px 30px;text-align:center;color:#94a3b8;font-size:0.8rem">Qualesce IT Asset Tracker</div>
-        </div>"""
-        send_notification_email([tech['email']], f'Service Request #{req_id} Assigned to You', html)
-    emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
+        </div>""", unsafe_allow_html=True)
+    with right:
+        msgs_html=""
+        for m in msgs:
+            is_me=m['sender_id']==st.session_state.user_id
+            bg='#533483' if is_me else '#0f3460' if m['sender_role']=='admin' else '#0891b2' if m['sender_role']=='technician' else '#e2e8f0'
+            tc='#fff' if m['sender_role']!='user' or is_me else '#1e293b'
+            side='justify-content-end' if is_me else ''
+            lbl='You' if is_me else f"{m['sender_name']} ({m['sender_role']})"
+            msgs_html+=f"""
+            <div class="d-flex mb-3 {side}">
+              <div style="max-width:75%">
+                <div class="small text-muted mb-1 {'text-end' if is_me else ''}">{lbl} · {m['created_at'][11:16]}</div>
+                <div style="padding:10px 14px;word-break:break-word;background:{bg};color:{tc};
+                  border-radius:{'12px 12px 0 12px' if is_me else '12px 12px 12px 0'}">{m['message']}</div>
+              </div>
+            </div>"""
+        st.markdown(f"""
+        <div class="panel" style="min-height:460px;display:flex;flex-direction:column">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-comments"></i> Chat</div></div>
+          <div style="flex:1;overflow-y:auto;padding:20px;background:#f8fafc;min-height:300px">
+            {msgs_html or '<div class="text-center text-muted py-4"><i class="fas fa-comments fa-2x mb-2 opacity-50"></i><p class="small">No messages yet.</p></div>'}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if req['status'] not in ('Declined','Completed'):
+            with st.form("ucf",clear_on_submit=True):
+                mi=st.text_area("",placeholder="Type your message...",height=80,label_visibility="collapsed")
+                if st.form_submit_button("Send Message 📨",use_container_width=True):
+                    if mi.strip(): _chat(req_id,req,mi.strip(),'user');st.rerun()
+        else: st.info(f"Chat closed — request is {req['status'].lower()}.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def pg_request_service():
+    name=st.session_state.employee_name
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    conn=get_db()
+    assets=conn.execute("SELECT asset_no,model FROM assets WHERE login_id LIKE ? ORDER BY asset_no",(f'%{name}%',)).fetchall()
     conn.close()
-    if _should_notify_employee(req['employee_id'], emp['email'] if emp else '', 'status_employee', 'status'):
-        send_notification_email([emp['email']], f'Your Request #{req_id} is Now In Progress',
-            build_status_email_html(req['employee_name'], 'In Progress', req_id, req['service_type'], req['asset_no']))
-    flash(f'Request assigned to {tech_name} and set to In Progress!', 'success')
-    return redirect(url_for('admin_service_request_detail', req_id=req_id))
+    st.markdown(f"""
+    <div class="panel" style="max-width:640px">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-wrench"></i> Submit a Service Request</div></div>
+      <div class="panel-body">""", unsafe_allow_html=True)
+    if not assets:
+        st.warning("No assets assigned to you. Contact IT Admin.")
+        st.markdown('</div></div></div>', unsafe_allow_html=True); return
+    with st.form("rsf"):
+        ao={a['asset_no']:f"{a['asset_no']} — {a['model']}" for a in assets}
+        an=st.selectbox("Select Asset *",list(ao.keys()),format_func=lambda x:ao[x])
+        st_=st.selectbox("Issue Type *",['Hardware Problem','Software Issue','Network Issue','Battery Problem','Screen Issue','Keyboard/Touchpad Issue','Slow Performance','Virus/Malware','OS Issue','Other'])
+        desc=st.text_area("Describe the Issue *",height=120,placeholder="Please describe the issue in detail...")
+        rem=st.text_input("Additional Remarks",placeholder="Any extra information...")
+        if st.form_submit_button("Submit Request 📤",use_container_width=True):
+            if desc.strip():
+                conn2=get_db()
+                cur=conn2.execute("INSERT INTO service_requests(asset_no,employee_id,employee_name,service_type,description,remarks,status) VALUES(?,?,?,?,?,?,?)",
+                    (an,st.session_state.user_id,name,st_,desc.strip(),rem,'Pending'))
+                rid=cur.lastrowid;conn2.commit()
+                admins=conn2.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
+                conn2.close()
+                if get_nc()['notify_new_request']:
+                    send_email([a['email'] for a in admins if a['email']],f"New Request #{rid} from {name}",f"<p><b>{name}</b> submitted request #{rid}: {st_} on {an}</p><p>{desc}</p>")
+                st.success("Request submitted! You'll be notified once reviewed.")
+                st.session_state.page='my_requests';st.rerun()
+            else: st.warning("Please describe the issue.")
+    st.markdown('</div></div></div>', unsafe_allow_html=True)
 
+def pg_email_prefs():
+    uid=st.session_state.user_id;role=st.session_state.role
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    conn=get_db();row=conn.execute("SELECT notification_prefs,email FROM users WHERE id=?",(uid,)).fetchone();conn.close()
+    uemail=row['email'] if row else ''
+    try: prefs=json.loads(row['notification_prefs']) if row and row['notification_prefs'] else {}
+    except: prefs={}
+    st.markdown(f"""
+    <div class="panel" style="max-width:640px">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-bell"></i> Email Preferences</div></div>
+      <div class="panel-body">
+        {'<div class="alert alert-info small"><i class="fas fa-envelope me-2"></i>Notifications sent to <strong>'+uemail+'</strong></div>' if uemail else '<div class="alert alert-warning small"><i class="fas fa-exclamation-triangle me-2"></i>No email set. Ask your admin to add one.</div>'}
+      </div>
+    </div>""", unsafe_allow_html=True)
+    with st.form("epf"):
+        if role=='technician':
+            na=st.checkbox("New task assigned to me",value=prefs.get('assigned',True))
+            nc=st.checkbox("Chat messages on my tasks",value=prefs.get('chat',True))
+            ns=st.checkbox("Admin status updates",value=prefs.get('status',True))
+            if st.form_submit_button("Save Preferences",use_container_width=True):
+                conn2=get_db();conn2.execute("UPDATE users SET notification_prefs=? WHERE id=?",(json.dumps({'assigned':na,'chat':nc,'status':ns}),uid));conn2.commit();conn2.close();st.success("Saved!")
+        else:
+            na=st.checkbox("Request accepted/declined",value=prefs.get('action',True))
+            ns=st.checkbox("Status changes",value=prefs.get('status',True))
+            nc=st.checkbox("Chat messages",value=prefs.get('chat',True))
+            if st.form_submit_button("Save Preferences",use_container_width=True):
+                conn2=get_db();conn2.execute("UPDATE users SET notification_prefs=? WHERE id=?",(json.dumps({'action':na,'status':ns,'chat':nc}),uid));conn2.commit();conn2.close();st.success("Saved!")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-@app.route('/admin/service-request/<int:req_id>/chat', methods=['POST'])
-@admin_required
-def admin_service_request_chat(req_id):
-    message = request.form.get('message', '').strip()
-    if not message:
-        return redirect(url_for('admin_service_request_detail', req_id=req_id))
-    conn = get_db()
-    req = conn.execute("SELECT * FROM service_requests WHERE id=?", (req_id,)).fetchone()
-    conn.execute(
-        "INSERT INTO chat_messages (request_id, sender_id, sender_name, sender_role, message) VALUES (?,?,?,?,?)",
-        (req_id, session['user_id'], session['employee_name'], 'admin', message))
-    conn.commit()
-    emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
-    if _should_notify_employee(req['employee_id'], emp['email'] if emp else '', 'chat', 'chat'):
-        send_notification_email([emp['email']], f'Admin replied on Request #{req_id}',
-            build_chat_email_html(session['employee_name'], 'admin', message, req_id, req['service_type']))
-    if req['assigned_to_id']:
-        tech = conn.execute("SELECT email FROM users WHERE id=?", (req['assigned_to_id'],)).fetchone()
-        if _should_notify_tech(req['assigned_to_id'], tech['email'] if tech else '', 'chat', 'chat'):
-            send_notification_email([tech['email']], f'New message on Request #{req_id}',
-                build_chat_email_html(session['employee_name'], 'admin', message, req_id, req['service_type']))
+# ─── Technician pages ──────────────────────────────────────────────────────────
+
+def pg_tech_dashboard():
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    conn=get_db()
+    reqs=conn.execute("SELECT * FROM service_requests WHERE assigned_to_id=? ORDER BY updated_at DESC",(st.session_state.user_id,)).fetchall()
     conn.close()
-    return redirect(url_for('admin_service_request_detail', req_id=req_id))
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Total Assigned",len(reqs));c2.metric("In Progress",sum(1 for r in reqs if r['status']=='In Progress'))
+    c3.metric("On Hold",sum(1 for r in reqs if r['status']=='Hold'));c4.metric("Completed",sum(1 for r in reqs if r['status']=='Completed'))
+    if not reqs:
+        st.markdown('<div class="panel mt-3"><div class="panel-body text-center text-muted py-5"><i class="fas fa-inbox fa-3x mb-3 opacity-50"></i><p>No requests assigned yet.</p></div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True); return
+    rows="".join(f"""<tr>
+      <td class="fw-bold text-muted">#{r['id']}</td>
+      <td class="fw-semibold">{r['employee_name']}</td>
+      <td>{r['asset_no'] or '—'}</td>
+      <td class="small">{r['service_type']}</td>
+      <td>{sbadge(r['status'])}</td>
+      <td class="small text-muted">{r['updated_at'][:10]}</td>
+    </tr>""" for r in reqs)
+    st.markdown(f"""
+    <div class="panel mt-3">
+      <div class="panel-header"><div class="panel-title"><i class="fas fa-tasks"></i> My Assigned Requests</div></div>
+      <div class="panel-body p-0"><div class="table-responsive">
+        <table class="table table-modern mb-0">
+          <thead><tr><th>#</th><th>Employee</th><th>Asset</th><th>Issue</th><th>Status</th><th>Updated</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div></div>
+    </div>""", unsafe_allow_html=True)
+    st.markdown("---"); st.caption("Click to open a request:")
+    cols=st.columns(min(len(reqs),4))
+    for i,r in enumerate(reqs[:8]):
+        with cols[i%4]:
+            if st.button(f"#{r['id']} {r['employee_name'][:10]}",key=f"tr_{r['id']}",use_container_width=True):
+                st.session_state.req_id=r['id']; st.session_state.page='tech_req_detail'; st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-
-# ---------------------------------------------------------------------------
-# Technician routes
-# ---------------------------------------------------------------------------
-
-@app.route('/technician')
-@technician_required
-def technician_dashboard():
-    conn = get_db()
-    reqs = conn.execute(
-        "SELECT * FROM service_requests WHERE assigned_to_id=? ORDER BY updated_at DESC",
-        (session['user_id'],)).fetchall()
-    stats = {
-        'total': len(reqs),
-        'in_progress': sum(1 for r in reqs if r['status'] == 'In Progress'),
-        'hold': sum(1 for r in reqs if r['status'] == 'Hold'),
-        'completed': sum(1 for r in reqs if r['status'] == 'Completed'),
-    }
+def pg_tech_req_detail():
+    req_id=st.session_state.get('req_id')
+    if not req_id: st.session_state.page='dashboard';st.rerun();return
+    conn=get_db()
+    req=conn.execute("SELECT * FROM service_requests WHERE id=? AND assigned_to_id=?",(req_id,st.session_state.user_id)).fetchone()
+    if not req: conn.close();st.error("Not found.");return
+    msgs=conn.execute("SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at",(req_id,)).fetchall()
     conn.close()
-    return render_template('technician/dashboard.html', requests=reqs, stats=stats)
+    st.markdown('<div class="content-area" style="padding:1.5rem 2rem">', unsafe_allow_html=True)
+    if st.button("← Dashboard"): st.session_state.page='dashboard';st.rerun()
+    st.markdown(f'<h4><i class="fas fa-tasks me-2 text-muted"></i>Request #{req_id} · {req["employee_name"]}</h4>', unsafe_allow_html=True)
+    left,right=st.columns([1,1.6])
+    with left:
+        st.markdown(f"""
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-info-circle"></i> Details</div></div>
+          <div class="panel-body">
+            <div class="text-center mb-3 fs-5">{sbadge(req['status'])}</div>
+            <table class="table table-sm small">
+              <tr><td class="text-muted fw-semibold">Employee</td><td>{req['employee_name']}</td></tr>
+              <tr><td class="text-muted fw-semibold">Asset</td><td>{req['asset_no'] or '—'}</td></tr>
+              <tr><td class="text-muted fw-semibold">Issue</td><td>{req['service_type']}</td></tr>
+            </table>
+            <div class="small bg-light rounded p-2">{req['description']}</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if req['status']!='Completed':
+            st.markdown('<div class="panel mt-3"><div class="panel-header"><div class="panel-title"><i class="fas fa-exchange-alt"></i> Update Status</div></div><div class="panel-body">', unsafe_allow_html=True)
+            with st.form("tsf"):
+                opts=['In Progress','Hold','Completed']
+                ns=st.selectbox("",opts,index=opts.index(req['status']) if req['status'] in opts else 0,label_visibility="collapsed")
+                if st.form_submit_button("Update Status",use_container_width=True):
+                    conn2=get_db();conn2.execute("UPDATE service_requests SET status=?,updated_at=? WHERE id=?",(ns,datetime.now().isoformat(),req_id));conn2.commit()
+                    emp=conn2.execute("SELECT email FROM users WHERE id=?",(req['employee_id'],)).fetchone()
+                    admins=conn2.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
+                    conn2.close();nc=get_nc()
+                    if emp and emp['email'] and nc['notify_status_employee']:
+                        send_email([emp['email']],f"Request #{req_id}: {ns}",status_email_html(req['employee_name'],ns,req_id,req['service_type'],req['asset_no']))
+                    if nc['notify_status_admin']:
+                        send_email([a['email'] for a in admins if a['email']],f"Tech updated Request #{req_id} to {ns}",status_email_html(req['employee_name'],ns,req_id,req['service_type'],req['asset_no']))
+                    st.success(f"Status → {ns}");st.rerun()
+            st.markdown('</div></div>', unsafe_allow_html=True)
+        else: st.success("✅ Task completed.")
+    with right:
+        msgs_html=""
+        for m in msgs:
+            is_me=m['sender_id']==st.session_state.user_id
+            bg='#0891b2' if is_me else '#0f3460' if m['sender_role']=='admin' else '#e2e8f0'
+            tc='#fff' if m['sender_role'] in ('admin','technician') else '#1e293b'
+            side='justify-content-end' if is_me else ''
+            lbl='You' if is_me else f"{m['sender_name']} ({m['sender_role']})"
+            msgs_html+=f"""
+            <div class="d-flex mb-3 {side}">
+              <div style="max-width:75%">
+                <div class="small text-muted mb-1 {'text-end' if is_me else ''}">{lbl} · {m['created_at'][11:16]}</div>
+                <div style="padding:10px 14px;word-break:break-word;background:{bg};color:{tc};
+                  border-radius:{'12px 12px 0 12px' if is_me else '12px 12px 12px 0'}">{m['message']}</div>
+              </div>
+            </div>"""
+        st.markdown(f"""
+        <div class="panel" style="min-height:460px;display:flex;flex-direction:column">
+          <div class="panel-header"><div class="panel-title"><i class="fas fa-comments"></i> Chat</div></div>
+          <div style="flex:1;overflow-y:auto;padding:20px;background:#f8fafc;min-height:300px">
+            {msgs_html or '<div class="text-center text-muted py-4"><i class="fas fa-comments fa-2x mb-2 opacity-50"></i><p class="small">No messages yet.</p></div>'}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if req['status']!='Completed':
+            with st.form("tcf",clear_on_submit=True):
+                mi=st.text_area("",placeholder="Type your message...",height=80,label_visibility="collapsed")
+                if st.form_submit_button("Send Message 📨",use_container_width=True):
+                    if mi.strip(): _chat(req_id,req,mi.strip(),'technician');st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
+# ─── Main ──────────────────────────────────────────────────────────────────────
 
-@app.route('/technician/request/<int:req_id>', methods=['GET', 'POST'])
-@technician_required
-def technician_request_detail(req_id):
-    conn = get_db()
-    req = conn.execute(
-        "SELECT * FROM service_requests WHERE id=? AND assigned_to_id=?",
-        (req_id, session['user_id'])).fetchone()
-    if not req:
-        conn.close()
-        flash('Request not found.', 'danger')
-        return redirect(url_for('technician_dashboard'))
-    if request.method == 'POST':
-        action = request.form.get('action')
-        if action == 'chat':
-            message = request.form.get('message', '').strip()
-            if message:
-                conn.execute(
-                    "INSERT INTO chat_messages (request_id, sender_id, sender_name, sender_role, message) VALUES (?,?,?,?,?)",
-                    (req_id, session['user_id'], session['employee_name'], 'technician', message))
-                conn.commit()
-                emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
-                admins = conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
-                recipients = []
-                if emp and emp['email']:
-                    recipients.append(emp['email'])
-                recipients += [a['email'] for a in admins if a['email']]
-                if get_notification_prefs()['chat']:
-                    if emp and emp['email'] and get_user_notif_prefs(req['employee_id']).get('chat', True):
-                        send_notification_email([emp['email']], f'Technician message on Request #{req_id}',
-                            build_chat_email_html(session['employee_name'], 'technician', message, req_id, req['service_type']))
-                    admin_emails_chat = [a['email'] for a in admins if a['email']]
-                    if admin_emails_chat:
-                        send_notification_email(admin_emails_chat, f'Technician message on Request #{req_id}',
-                            build_chat_email_html(session['employee_name'], 'technician', message, req_id, req['service_type']))
-        elif action == 'status':
-            new_status = request.form.get('status')
-            if new_status in ('In Progress', 'Hold', 'Completed'):
-                conn.execute("UPDATE service_requests SET status=?, updated_at=? WHERE id=?",
-                             (new_status, datetime.now().isoformat(), req_id))
-                conn.commit()
-                emp = conn.execute("SELECT email FROM users WHERE id=?", (req['employee_id'],)).fetchone()
-                admins = conn.execute("SELECT email FROM users WHERE role='admin' AND email!=''").fetchall()
-                _prefs = get_notification_prefs()
-                if _should_notify_employee(req['employee_id'], emp['email'] if emp else '', 'status_employee', 'status'):
-                    send_notification_email([emp['email']], f'Request #{req_id} Status: {new_status}',
-                        build_status_email_html(req['employee_name'], new_status, req_id, req['service_type'], req['asset_no']))
-                admin_emails = [a['email'] for a in admins if a['email']]
-                if admin_emails and _prefs['status_admin']:
-                    send_notification_email(admin_emails, f'Technician updated Request #{req_id} to {new_status}',
-                        build_status_email_html(req['employee_name'], new_status, req_id, req['service_type'], req['asset_no']))
-                flash(f'Status updated to {new_status}!', 'success')
-        conn.close()
-        return redirect(url_for('technician_request_detail', req_id=req_id))
-    messages = conn.execute(
-        "SELECT * FROM chat_messages WHERE request_id=? ORDER BY created_at ASC",
-        (req_id,)).fetchall()
-    conn.close()
-    return render_template('technician/request_detail.html', req=req, messages=messages)
+def main():
+    init_db()
+    logo_b64 = inject_theme()
 
+    if not st.session_state.get('logged_in'):
+        page_login(logo_b64); return
 
-# Run DB init and Excel import at module load time so gunicorn/WSGI works too
-init_db()
-import_excel()
+    sidebar_nav(logo_b64)
 
-if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("  IT Asset Tracker is running!")
-    print("  Open: http://localhost:5000")
-    print("  Admin: admin / admin123")
-    print("  User:  (employee username) / pass123")
-    print("="*50 + "\n")
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
+    role  = st.session_state.role
+    page  = st.session_state.get('page','dashboard')
+
+    if role == 'admin':
+        {'dashboard':pg_admin_dashboard,'service_requests':pg_admin_service_requests,
+         'req_detail':pg_admin_req_detail,'assets':pg_admin_assets,'employees':pg_admin_employees,
+         'services':pg_admin_services,'users':pg_admin_users,'email_config':pg_email_config
+        }.get(page, pg_admin_dashboard)()
+    elif role == 'technician':
+        {'dashboard':pg_tech_dashboard,'tech_req_detail':pg_tech_req_detail,
+         'email_prefs':pg_email_prefs}.get(page, pg_tech_dashboard)()
+    else:
+        {'dashboard':pg_user_dashboard,'my_requests':pg_user_my_requests,
+         'req_detail_user':pg_user_req_detail,'request_service':pg_request_service,
+         'email_prefs':pg_email_prefs}.get(page, pg_user_dashboard)()
+
+main()
