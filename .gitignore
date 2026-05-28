@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/ittracker.db
+email_config.ini
+*.bat
+redirect
+37
